@@ -15,13 +15,18 @@
  *   - a generic CONNECT-tunnel helper that works over Unix socket, TCP, or TLS
  */
 
-import type { Socket } from 'node:net'
+import type { LookupFunction, Socket } from 'node:net'
 import type { IncomingHttpHeaders } from 'node:http'
 import { BlockList, connect as netConnect, isIP } from 'node:net'
 import { connect as tlsConnect } from 'node:tls'
 import { URL } from 'node:url'
 import { logForDebugging } from '../utils/debug.js'
 import type { ParentProxyConfig } from './sandbox-config.js'
+import {
+  addressInSet,
+  isLoopbackAddress,
+  parseAddressRange,
+} from './resolved-address-guard.js'
 
 export interface ResolvedParentProxy {
   httpUrl?: URL
@@ -127,26 +132,11 @@ function parseNoProxy(raw: string): NoProxyRules {
       continue
     }
 
-    // CIDR?
-    const slash = entry.indexOf('/')
-    if (slash !== -1) {
-      const ip = entry.slice(0, slash)
-      const prefixStr = entry.slice(slash + 1)
-      const fam = isIP(ip)
-      if (fam && prefixStr !== '' && /^\d+$/.test(prefixStr)) {
-        const prefix = Number(prefixStr)
-        const max = fam === 6 ? 128 : 32
-        if (prefix >= 0 && prefix <= max) {
-          try {
-            rules.cidr.addSubnet(ip, prefix, fam === 6 ? 'ipv6' : 'ipv4')
-          } catch {
-            // BlockList rejected it — ignore this entry.
-          }
-          continue
-        }
-      }
-      // malformed CIDR → ignore (do NOT treat as suffix; `/` isn't a valid
-      // hostname char)
+    // CIDR? A malformed one is ignored (do NOT treat as suffix; `/` isn't
+    // a valid hostname char).
+    if (entry.includes('/')) {
+      const range = parseAddressRange(entry)
+      if (range) rules.cidr.addSubnet(range.address, range.prefix, range.family)
       continue
     }
 
@@ -194,17 +184,10 @@ export function shouldBypassParentProxy(
 
   // Always bypass loopback — chaining localhost through an upstream proxy is
   // never what you want. Covers the whole 127/8 block and IPv4-mapped forms.
-  if (h === 'localhost') return true
-  const fam = isIP(h)
-  if (fam) {
-    if (LOOPBACK.check(h, fam === 6 ? 'ipv6' : 'ipv4')) return true
-  }
+  if (h === 'localhost' || isLoopbackAddress(h)) return true
 
   if (resolved.noProxy.all) return true
-
-  if (fam) {
-    if (resolved.noProxy.cidr.check(h, fam === 6 ? 'ipv6' : 'ipv4')) return true
-  }
+  if (addressInSet(resolved.noProxy.cidr, h)) return true
 
   for (const v of resolved.noProxy.suffixes) {
     if (v.startsWith('.')) {
@@ -217,14 +200,6 @@ export function shouldBypassParentProxy(
   }
   return false
 }
-
-const LOOPBACK = (() => {
-  const bl = new BlockList()
-  bl.addSubnet('127.0.0.0', 8, 'ipv4')
-  bl.addAddress('::1', 'ipv6')
-  bl.addSubnet('::ffff:127.0.0.0', 104, 'ipv6') // v4-mapped loopback
-  return bl
-})()
 
 /**
  * Pick which parent proxy URL to use for a given destination.
@@ -482,6 +457,18 @@ export function canonicalizeHost(h: string): string | undefined {
   }
 }
 
+export interface DialDirectOptions {
+  timeoutMs?: number
+  /**
+   * Custom name resolution for hostname destinations — the manager passes
+   * the resolved-address guard's `lookup` so an allow-listed name that
+   * resolves into denied address space is refused instead of dialed. The
+   * runtime connects to the addresses this returns (no second resolution)
+   * and keeps its usual multi-address fallback.
+   */
+  lookup?: LookupFunction
+}
+
 /**
  * Dial `host:port` directly with a bounded timeout. Shared by the HTTP and
  * SOCKS direct-connect paths so they get the same timeout behaviour as the
@@ -490,10 +477,15 @@ export function canonicalizeHost(h: string): string | undefined {
 export function dialDirect(
   host: string,
   port: number,
-  timeoutMs = CONNECT_TIMEOUT_MS,
+  opts: DialDirectOptions = {},
 ): Promise<Socket> {
+  const timeoutMs = opts.timeoutMs ?? CONNECT_TIMEOUT_MS
   return new Promise((resolve, reject) => {
-    const s = netConnect(port, host)
+    const s = netConnect({
+      port,
+      host,
+      ...(opts.lookup ? { lookup: opts.lookup } : {}),
+    })
     let settled = false
     const done = (err?: Error) => {
       if (settled) return

@@ -213,7 +213,11 @@ function deny(res: ServerResponse, decision: RequestDecision): void {
  * network failure. Shared by filterRequest denials and other in-proxy
  * policy decisions (e.g. SigV4 shapes that cannot be re-signed).
  */
-export function respondDenied(res: ServerResponse, reason: string): void {
+export function respondDenied(
+  res: ServerResponse,
+  reason: string,
+  tag = 'blocked-by-sandbox-runtime',
+): void {
   logForDebugging(`[request-filter] deny: ${reason}`)
   if (res.headersSent) {
     res.destroy()
@@ -221,7 +225,7 @@ export function respondDenied(res: ServerResponse, reason: string): void {
   }
   res.writeHead(403, {
     'Content-Type': 'text/plain',
-    'X-Proxy-Error': 'blocked-by-sandbox-runtime',
+    'X-Proxy-Error': tag,
   })
   res.end(reason + '\n')
 }

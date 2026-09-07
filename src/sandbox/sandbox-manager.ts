@@ -103,6 +103,10 @@ import {
 } from './domain-pattern.js'
 import type { ChildProcess } from 'node:child_process'
 import type { ResolvedParentProxy } from './parent-proxy.js'
+import {
+  createResolvedAddressGuard,
+  type ResolvedAddressGuard,
+} from './resolved-address-guard.js'
 import { EOL } from 'node:os'
 import { dirname } from 'node:path'
 import { getJavaProxyAgentJarPath } from './java-proxy-agent.js'
@@ -127,6 +131,12 @@ let cleanupRegistered = false
 let logMonitorShutdown: (() => void) | undefined
 let linuxMonitor: LinuxViolationMonitor | undefined
 let parentProxy: ResolvedParentProxy | undefined
+/**
+ * Address policy for hostname destinations the proxies dial directly.
+ * Rebuilt by initialize()/updateConfig(); the proxies call through
+ * {@link guardedLookup} so a config update applies to the next dial.
+ */
+let resolvedAddressGuard: ResolvedAddressGuard = createResolvedAddressGuard()
 let mitmCA: MitmCA | undefined
 /**
  * Resolved path of the JVM proxy agent jar (see java-proxy-agent.ts); set
@@ -269,6 +279,31 @@ function recordProxyViolation(
     command,
     timestamp: new Date(),
   })
+}
+
+function buildResolvedAddressGuard(
+  network: SandboxRuntimeConfig['network'],
+): ResolvedAddressGuard {
+  return createResolvedAddressGuard({
+    denied: network.deniedResolvedAddresses,
+    allowed: network.allowedResolvedAddresses,
+  })
+}
+
+/** `lookup` handed to the proxies; reads the current guard on every dial. */
+const guardedLookup: ResolvedAddressGuard['lookup'] = (...args) =>
+  resolvedAddressGuard.lookup(...args)
+
+function recordDirectDialDenied(info: {
+  host: string
+  port: number
+  reason: string
+  encodedCommand?: string
+}): void {
+  recordProxyViolation(
+    `deny network-outbound ${info.host}:${info.port} (${info.reason})`,
+    info.encodedCommand,
+  )
 }
 
 /**
@@ -538,6 +573,8 @@ async function startMuxProxyServer(
     // injection: the real signature must not travel over plaintext.
     planSigv4: buildSigv4Planner(),
     parentProxy,
+    lookup: guardedLookup,
+    onDirectDialDenied: recordDirectDialDenied,
     proxyAuthToken,
   })
 
@@ -545,6 +582,8 @@ async function startMuxProxyServer(
     filter: (port, host, encodedCommand) =>
       filterNetworkRequest(port, host, sandboxAskCallback, encodedCommand),
     parentProxy,
+    lookup: guardedLookup,
+    onDirectDialDenied: recordDirectDialDenied,
     proxyAuthToken,
     probeUnauthenticated: async (port, host) => {
       // Explicit deny rules only: an unauthenticated peer must never reach
@@ -621,6 +660,7 @@ async function initialize(
         `https=${redactUrl(parentProxy.httpsUrl)}`,
     )
   }
+  resolvedAddressGuard = buildResolvedAddressGuard(runtimeConfig.network)
 
   // Load TLS-termination CA if configured. Throws on unreadable/non-PEM —
   // tlsTerminate is explicit opt-in, so a bad config is a hard error.
@@ -1937,12 +1977,17 @@ function updateConfig(newConfig: SandboxRuntimeConfig): void {
       { level: 'warn' },
     )
   }
+  // Built before anything is swapped: a malformed range throws here and
+  // leaves the previous config fully in effect. Unlike parentProxy below,
+  // the proxies read this live, so it applies to the next dial.
+  const nextGuard = buildResolvedAddressGuard(newConfig.network)
   // Deep clone the config to avoid mutations. structuredClone cannot clone
   // functions, so pull filterRequest out, clone the rest, and put it back —
   // a function reference is immutable in the sense that matters here.
   const { filterRequest, ...rest } = newConfig.network
   config = structuredClone({ ...newConfig, network: rest })
   config.network.filterRequest = filterRequest
+  resolvedAddressGuard = nextGuard
   // Re-resolve parent proxy so hot-reload picks up changes. Note: the proxy
   // servers capture `parentProxy` by value at creation, so changes here take
   // effect only on re-initialize. This keeps the state consistent for the
@@ -2207,6 +2252,7 @@ async function reset(): Promise<void> {
   managerContext = undefined
   initializationPromise = undefined
   parentProxy = undefined
+  resolvedAddressGuard = createResolvedAddressGuard()
   mitmCA = undefined
   javaAgentJarPath = undefined
   sentinelRegistry.clear()

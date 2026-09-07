@@ -15,6 +15,7 @@ import {
 } from 'node:https'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { connect, isIP } from 'node:net'
+import type { LookupFunction } from 'node:net'
 import { unlink } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -35,6 +36,11 @@ import { mintLeafCert, secureContextFor } from './mitm-leaf.js'
 import { stripHopByHop } from './parent-proxy.js'
 import { sha256Hex } from './aws-sigv4.js'
 import type { PlanSigv4 } from './credential-aws-pairs.js'
+import {
+  isResolvedAddressDenied,
+  RESOLVED_ADDRESS_DENIED_BODY,
+  RESOLVED_ADDRESS_DENIED_TAG,
+} from './resolved-address-guard.js'
 
 /**
  * Upper bound on the request body the proxy will buffer to recompute a
@@ -154,12 +160,20 @@ export type TerminateTarget = {
    */
   upstreamCA?: string | Buffer | Array<string | Buffer>
   /**
+   * Name resolution for the upstream leg (see HttpProxyServerOptions.lookup):
+   * a hostname target that resolves into denied address space gets a 403
+   * instead of a dial.
+   */
+  lookup?: LookupFunction
+  /**
    * Called when filterRequest denies a parsed request, with the verified
    * method/URL and the decision reason. Carried on the target so the
    * per-connection request handler (which closes over `target`) can reach
    * it without an extra parameter on every layer.
    */
   onFilterRequestDeny?: (method: string, url: string, reason: string) => void
+  /** Called when `lookup` refuses the upstream dial, with the violation reason. */
+  onDialDenied?: (reason: string) => void
 }
 
 /**
@@ -393,9 +407,14 @@ async function forwardUpstream(
   // Bun's https.request verifies the upstream cert against headers.host
   // verbatim (including ":port"), which never matches a SAN. Drop the host
   // header and let the runtime derive it from {host, port} — same wire value,
-  // correct verification under both Node and Bun.
+  // correct verification under both Node and Bun. For :443 set the bare
+  // name explicitly instead (wire-identical to the derived value): Bun
+  // <= 1.3.10 verifies against the resolved IP when a custom `lookup` is in
+  // play unless headers.host names the host.
   const fwdHeaders = stripHopByHop(req.headers)
-  delete fwdHeaders.host
+  if (target.port === 443 && !isIP(target.hostname)) {
+    fwdHeaders.host = target.hostname
+  } else delete fwdHeaders.host
   // SigV4 planning runs on the PRE-substitution headers (the trigger is
   // the fake access key id in the credential scope, which the header
   // substitution below replaces) but on the POST-strip view: the plan's
@@ -534,6 +553,7 @@ async function forwardUpstream(
       // omitting the key, so spread conditionally.
       ...(isIP(target.hostname) ? {} : { servername: target.hostname }),
       ...(target.upstreamCA ? { ca: target.upstreamCA } : {}),
+      ...(target.lookup ? { lookup: target.lookup } : {}),
       // No global agent: a proxy's outbound leg shouldn't share a connection
       // pool keyed on the proxy process. Also works around a Bun quirk where
       // the first request's `ca:` value is cached on the global agent and
@@ -560,7 +580,14 @@ async function forwardUpstream(
       `[tls-terminate] upstream ${target.hostname}:${target.port} failed: ${err.message}`,
       { level: 'error' },
     )
-    if (!res.headersSent) {
+    if (isResolvedAddressDenied(err)) {
+      target.onDialDenied?.(err.reason)
+      respondDenied(
+        res,
+        RESOLVED_ADDRESS_DENIED_BODY,
+        RESOLVED_ADDRESS_DENIED_TAG,
+      )
+    } else if (!res.headersSent) {
       res.writeHead(502, { 'Content-Type': 'text/plain' })
       res.end('Bad Gateway')
     } else {

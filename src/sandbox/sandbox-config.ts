@@ -13,6 +13,7 @@ import {
   splitDomainPatternPort,
   stripDomainPatternPort,
 } from './domain-pattern.js'
+import { isValidAddressRange } from './resolved-address-guard.js'
 
 /**
  * Host-only pattern check (e.g., "example.com", "*.npmjs.org"). Rejects
@@ -117,6 +118,12 @@ const deniedDomainPatternSchema = z.string().refine(
       ' In deniedDomains a bare "*" (deny-all) is also accepted, and an optional ":port" suffix (1-65535) restricts the entry to that port.',
   },
 )
+
+/** IP literal or CIDR range (`10.0.0.0/8`, `fc00::/7`, `169.254.169.254`). */
+const addressRangeSchema = z.string().refine(isValidAddressRange, {
+  message:
+    'Invalid IP address or CIDR range. Use an IPv4/IPv6 literal or CIDR, e.g. "10.0.0.0/8", "192.168.1.10", "fc00::/7" (IPv6 unbracketed).',
+})
 
 /**
  * Schema for filesystem paths
@@ -732,6 +739,24 @@ export const NetworkConfigSchema = z.object({
     .optional()
     .describe(
       'If true, hosts not in allowedDomains are denied without consulting the ask callback. Set this when allowedDomains is policy enforcement, not a prompt-suppression hint.',
+    ),
+  deniedResolvedAddresses: z
+    .array(addressRangeSchema)
+    .optional()
+    .describe(
+      'IP addresses / CIDR ranges an allowed HOSTNAME must not resolve to, in addition to the built-in set ' +
+        '(loopback, unspecified, link-local, multicast, broadcast). A permitted name that resolves only into ' +
+        'these is refused instead of dialed; e.g. ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"] ' +
+        'keeps allow-listed names out of private address space. Does not apply to allowlist entries that are ' +
+        'IP literals, and is not evaluated for connections routed through parentProxy or mitmProxy (that hop resolves the name).',
+    ),
+  allowedResolvedAddresses: z
+    .array(addressRangeSchema)
+    .optional()
+    .describe(
+      'Carve-outs from the resolved-address check: an allowed hostname MAY resolve into these even if they fall ' +
+        'in the built-in or deniedResolvedAddresses set, e.g. ["127.0.0.1"] when allow-listed dev hostnames ' +
+        'point at a local server via /etc/hosts. "localhost" and names under ".localhost" may resolve to loopback without this.',
     ),
   allowUnixSockets: z
     .array(z.string())
