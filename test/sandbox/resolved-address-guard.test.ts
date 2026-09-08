@@ -11,18 +11,20 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
 import {
   createResolvedAddressGuard,
-  DEFAULT_DENIED_RESOLVED_ADDRESSES,
   isResolvedAddressDenied,
-  isValidAddressRange,
   localInterfaceAddresses,
-  parseAddressRange,
-  RESOLVED_ADDRESS_DENIED_TAG,
   ResolvedAddressDeniedError,
+  type ResolvedAddressGuard,
   type Resolver,
 } from '../../src/sandbox/resolved-address-guard.js'
-import { createHttpProxyServer } from '../../src/sandbox/http-proxy.js'
+import { parseAddressRange } from '../../src/sandbox/address.js'
+import {
+  createHttpProxyServer,
+  type DirectLookup,
+} from '../../src/sandbox/http-proxy.js'
 import { createSocksProxyServer } from '../../src/sandbox/socks-proxy.js'
 import { SandboxRuntimeConfigSchema } from '../../src/sandbox/sandbox-config.js'
+import { ipLiteralRules } from '../../src/sandbox/domain-pattern.js'
 import { createMitmCA } from '../../src/sandbox/mitm-ca.js'
 import { mintLeafCert } from '../../src/sandbox/mitm-leaf.js'
 
@@ -68,18 +70,35 @@ function fakeResolver(table: Record<string, string[]>): Resolver & {
 }
 
 function lookupAll(
-  guard: ReturnType<typeof createResolvedAddressGuard>,
+  guard: ResolvedAddressGuard,
   hostname: string,
+  port = 443,
 ): Promise<LookupAddress[]> {
   return new Promise((resolve, reject) => {
-    guard.lookup(hostname, { all: true }, (err, addresses) => {
+    guard.lookupFor(port)(hostname, { all: true }, (err, addresses) => {
       if (err) reject(err)
       else resolve(addresses as LookupAddress[])
     })
   })
 }
 
-describe('resolved-address-guard: parseAddressRange', () => {
+type Denial = { host: string; port: number; reason: string }
+
+/** What the manager does: the guard's lookup for the port, recording refusals. */
+function recordingLookupFor(
+  guard: ResolvedAddressGuard,
+  denials: Denial[],
+): DirectLookup {
+  return port => (hostname, options, callback) =>
+    guard.lookupFor(port)(hostname, options, (err, address, family) => {
+      if (isResolvedAddressDenied(err)) {
+        denials.push({ host: hostname, port, reason: err.reason })
+      }
+      callback(err, address, family)
+    })
+}
+
+describe('address: parseAddressRange', () => {
   it('accepts IPv4/IPv6 literals and CIDR ranges', () => {
     expect(parseAddressRange('10.0.0.0/8')).toEqual({
       address: '10.0.0.0',
@@ -110,7 +129,7 @@ describe('resolved-address-guard: parseAddressRange', () => {
       '',
       '300.1.1.1',
     ]) {
-      expect(isValidAddressRange(bad)).toBe(false)
+      expect(parseAddressRange(bad)).toBeUndefined()
     }
   })
 })
@@ -141,31 +160,36 @@ describe('resolved-address-guard: permits', () => {
       'fe80::1',
       'fe80::1%en0',
       'fe80::1%1',
+      '::1%lo0',
       'FE80::ABCD',
       'febf::1',
       'ff02::1',
       'fd00:ec2::254',
     ]) {
-      expect(guard.permits('api.example.com', addr)).toBe(false)
+      expect(guard.permits('api.example.com', addr, 443)).toBe(false)
     }
   })
 
   it("denies this host's own interface addresses, read at lookup time", () => {
-    expect(guard.permits('api.example.com', '192.168.7.23')).toBe(false)
-    expect(guard.permits('api.example.com', '::ffff:192.168.7.23')).toBe(false)
-    expect(guard.permits('api.example.com', '2001:DB8:7:0::23')).toBe(false)
-    expect(guard.permits('api.example.com', '192.168.7.24')).toBe(true)
+    expect(guard.permits('api.example.com', '192.168.7.23', 443)).toBe(false)
+    expect(guard.permits('api.example.com', '::ffff:192.168.7.23', 443)).toBe(
+      false,
+    )
+    expect(guard.permits('api.example.com', '2001:DB8:7:0::23', 443)).toBe(
+      false,
+    )
+    expect(guard.permits('api.example.com', '192.168.7.24', 443)).toBe(true)
     let current = ['10.9.8.7']
     const live = createResolvedAddressGuard({ localAddresses: () => current })
-    expect(live.permits('api.example.com', '10.9.8.7')).toBe(false)
+    expect(live.permits('api.example.com', '10.9.8.7', 443)).toBe(false)
     current = []
-    expect(live.permits('api.example.com', '10.9.8.7')).toBe(true)
+    expect(live.permits('api.example.com', '10.9.8.7', 443)).toBe(true)
     // A carve-out for the LAN address wins, like any other.
     const carved = createResolvedAddressGuard({
       localAddresses,
       allowed: ['192.168.7.23'],
     })
-    expect(carved.permits('nas.example.com', '192.168.7.23')).toBe(true)
+    expect(carved.permits('nas.example.com', '192.168.7.23', 443)).toBe(true)
   })
 
   it('permits public and (by default) private-use addresses for a hostname', () => {
@@ -179,27 +203,27 @@ describe('resolved-address-guard: permits', () => {
       'fd00::1',
       '100.64.0.1',
     ]) {
-      expect(guard.permits('api.example.com', addr)).toBe(true)
+      expect(guard.permits('api.example.com', addr, 443)).toBe(true)
     }
   })
 
   it('never re-judges an IP-literal destination', () => {
-    expect(guard.permits('127.0.0.1', '127.0.0.1')).toBe(true)
-    expect(guard.permits('::1', '::1')).toBe(true)
-    expect(guard.permits('169.254.169.254', '169.254.169.254')).toBe(true)
+    expect(guard.permits('127.0.0.1', '127.0.0.1', 443)).toBe(true)
+    expect(guard.permits('::1', '::1', 443)).toBe(true)
+    expect(guard.permits('169.254.169.254', '169.254.169.254', 443)).toBe(true)
   })
 
   it('lets localhost names resolve to loopback and nothing else', () => {
-    expect(guard.permits('localhost', '127.0.0.1')).toBe(true)
-    expect(guard.permits('localhost', '::1')).toBe(true)
-    expect(guard.permits('localhost', '::ffff:127.0.0.1')).toBe(true)
-    expect(guard.permits('LOCALHOST.', '127.0.0.1')).toBe(true)
-    expect(guard.permits('app.dev.localhost', '127.0.0.1')).toBe(true)
-    expect(guard.permits('localhost', '169.254.169.254')).toBe(false)
-    expect(guard.permits('app.localhost', '192.0.2.1')).toBe(false)
-    expect(guard.permits('app.localhost', '10.0.0.5')).toBe(false)
-    expect(guard.permits('notlocalhost', '127.0.0.1')).toBe(false)
-    expect(guard.permits('localhost.example.com', '127.0.0.1')).toBe(false)
+    expect(guard.permits('localhost', '127.0.0.1', 443)).toBe(true)
+    expect(guard.permits('localhost', '::1', 443)).toBe(true)
+    expect(guard.permits('localhost', '::ffff:127.0.0.1', 443)).toBe(true)
+    expect(guard.permits('LOCALHOST.', '127.0.0.1', 443)).toBe(true)
+    expect(guard.permits('app.dev.localhost', '127.0.0.1', 443)).toBe(true)
+    expect(guard.permits('localhost', '169.254.169.254', 443)).toBe(false)
+    expect(guard.permits('app.localhost', '192.0.2.1', 443)).toBe(false)
+    expect(guard.permits('app.localhost', '10.0.0.5', 443)).toBe(false)
+    expect(guard.permits('notlocalhost', '127.0.0.1', 443)).toBe(false)
+    expect(guard.permits('localhost.example.com', '127.0.0.1', 443)).toBe(false)
   })
 
   it('applies embedder-configured denied ranges (and their v4-mapped twins)', () => {
@@ -207,43 +231,52 @@ describe('resolved-address-guard: permits', () => {
       localAddresses,
       denied: ['10.0.0.0/8', '192.168.0.0/16', 'fc00::/7'],
     })
-    expect(g.permits('intranet.example.com', '10.1.2.3')).toBe(false)
-    expect(g.permits('intranet.example.com', '::ffff:10.1.2.3')).toBe(false)
-    expect(g.permits('intranet.example.com', '192.168.1.1')).toBe(false)
-    expect(g.permits('intranet.example.com', 'fd12:3456::1')).toBe(false)
-    expect(g.permits('intranet.example.com', '172.16.0.1')).toBe(true)
-    expect(g.permits('intranet.example.com', '192.0.2.10')).toBe(true)
+    expect(g.permits('intranet.example.com', '10.1.2.3', 443)).toBe(false)
+    expect(g.permits('intranet.example.com', '::ffff:10.1.2.3', 443)).toBe(
+      false,
+    )
+    expect(g.permits('intranet.example.com', '192.168.1.1', 443)).toBe(false)
+    expect(g.permits('intranet.example.com', 'fd12:3456::1', 443)).toBe(false)
+    expect(g.permits('intranet.example.com', '172.16.0.1', 443)).toBe(true)
+    expect(g.permits('intranet.example.com', '192.0.2.10', 443)).toBe(true)
     // Built-ins still apply alongside the extras.
-    expect(g.permits('intranet.example.com', '127.0.0.1')).toBe(false)
+    expect(g.permits('intranet.example.com', '127.0.0.1', 443)).toBe(false)
   })
 
-  it('allowed carve-outs win over the denied set', () => {
+  it('allowed carve-outs win over the denied set, per port when given one', () => {
     const g = createResolvedAddressGuard({
       localAddresses,
-      allowed: ['127.0.0.1'],
+      allowed: ['127.0.0.1', { range: '::1', port: 3000 }],
     })
-    expect(g.permits('myapp.test', '127.0.0.1')).toBe(true)
-    expect(g.permits('myapp.test', '127.0.0.2')).toBe(false)
-    expect(g.permits('myapp.test', '::1')).toBe(false)
+    expect(g.permits('myapp.test', '127.0.0.1', 443)).toBe(true)
+    expect(g.permits('myapp.test', '127.0.0.2', 443)).toBe(false)
+    expect(g.permits('myapp.test', '::1', 3000)).toBe(true)
+    expect(g.permits('myapp.test', '::1', 443)).toBe(false)
+  })
+
+  it('port-qualified denied rules apply to that port only', () => {
+    const g = createResolvedAddressGuard({
+      localAddresses,
+      denied: [{ range: '10.0.0.5', port: 22 }, '10.9.0.0/16'],
+    })
+    expect(g.permits('git.example.com', '10.0.0.5', 22)).toBe(false)
+    expect(g.permits('git.example.com', '10.0.0.5', 443)).toBe(true)
+    expect(g.permits('git.example.com', '10.9.1.1', 443)).toBe(false)
   })
 
   it('throws on a malformed entry (schema validates first)', () => {
     expect(() => createResolvedAddressGuard({ denied: ['nope/8'] })).toThrow(
       /Invalid IP address or CIDR range/,
     )
-    expect(() => createResolvedAddressGuard({ allowed: ['[::1]'] })).toThrow()
-  })
-
-  it('exports the documented default set', () => {
-    expect(DEFAULT_DENIED_RESOLVED_ADDRESSES).toContain('127.0.0.0/8')
-    expect(DEFAULT_DENIED_RESOLVED_ADDRESSES).toContain('169.254.0.0/16')
-    expect(DEFAULT_DENIED_RESOLVED_ADDRESSES).not.toContain('10.0.0.0/8')
+    expect(() =>
+      createResolvedAddressGuard({ allowed: [{ range: '[::1]', port: 80 }] }),
+    ).toThrow()
   })
 
   it("by default reads the machine's real interface addresses", () => {
     const real = createResolvedAddressGuard()
     for (const addr of localInterfaceAddresses()) {
-      expect(real.permits('api.example.com', addr)).toBe(false)
+      expect(real.permits('api.example.com', addr, 443)).toBe(false)
     }
   })
 })
@@ -277,20 +310,27 @@ describe('resolved-address-guard: lookup', () => {
     })
     const guard = createResolvedAddressGuard({ resolve, localAddresses })
     const got = await new Promise<[string, number | undefined]>((res, rej) =>
-      guard.lookup('mixed.example.com', {}, (err, address, family) =>
+      guard.lookupFor(443)('mixed.example.com', {}, (err, address, family) =>
         err ? rej(err) : res([address as string, family]),
       ),
     )
     expect(got).toEqual(['192.0.2.10', 4])
   })
 
-  it('passes IP literals through without consulting the resolver', async () => {
-    const resolve = fakeResolver({})
+  it('never filters an IP-literal destination', async () => {
+    const resolve = fakeResolver({ '127.0.0.1': ['127.0.0.1'] })
     const guard = createResolvedAddressGuard({ resolve })
     expect(await lookupAll(guard, '127.0.0.1')).toEqual([
       { address: '127.0.0.1', family: 4 },
     ])
-    expect(resolve.calls).toEqual([])
+  })
+
+  it('an empty answer without an error surfaces as ENOTFOUND', async () => {
+    const guard = createResolvedAddressGuard({
+      resolve: fakeResolver({ 'empty.example.com': [] }),
+    })
+    const err = await lookupAll(guard, 'empty.example.com').catch(e => e)
+    expect(err.code).toBe('ENOTFOUND')
   })
 
   it('propagates resolver errors unchanged', async () => {
@@ -307,13 +347,12 @@ describe('resolved-address-guard: config schema', () => {
     filesystem: { denyRead: [], allowWrite: [], denyWrite: [] },
   }
 
-  it('accepts deniedResolvedAddresses / allowedResolvedAddresses', () => {
+  it('accepts deniedResolvedAddresses', () => {
     const r = SandboxRuntimeConfigSchema.safeParse({
       ...base,
       network: {
         ...base.network,
         deniedResolvedAddresses: ['10.0.0.0/8', 'fc00::/7', '192.0.2.1'],
-        allowedResolvedAddresses: ['127.0.0.1'],
       },
     })
     expect(r.success).toBe(true)
@@ -331,6 +370,38 @@ describe('resolved-address-guard: config schema', () => {
       )
     }
   })
+
+  it('derives the address rules from the IP-literal entries of the allow/deny lists', () => {
+    const rules = ipLiteralRules([
+      '*.example.com',
+      'localhost',
+      '127.0.0.1:3000',
+      '[::1]',
+      '[2001:db8::1]:443',
+      '10.0.0.5',
+      '*:22',
+    ])
+    expect(rules).toEqual([
+      { range: '127.0.0.1', port: 3000 },
+      { range: '::1', port: undefined },
+      { range: '2001:db8::1', port: 443 },
+      { range: '10.0.0.5', port: undefined },
+    ])
+    // What the manager builds from allowedDomains: a name may reach exactly
+    // what an allow-listed literal already permits, nothing wider.
+    const g = createResolvedAddressGuard({
+      localAddresses,
+      allowed: ipLiteralRules(['myapp.test', '127.0.0.1:3000']),
+      denied: ipLiteralRules(['10.0.0.5', '[fd00::7]:22']),
+    })
+    expect(g.permits('myapp.test', '127.0.0.1', 3000)).toBe(true)
+    expect(g.permits('myapp.test', '127.0.0.1', 5432)).toBe(false)
+    expect(g.permits('evil.example.com', '127.0.0.1', 3000)).toBe(true)
+    expect(g.permits('evil.example.com', '127.0.0.2', 3000)).toBe(false)
+    expect(g.permits('intranet.example.com', '10.0.0.5', 443)).toBe(false)
+    expect(g.permits('intranet.example.com', 'fd00::7', 22)).toBe(false)
+    expect(g.permits('intranet.example.com', 'fd00::7', 443)).toBe(true)
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -343,7 +414,7 @@ describe('resolved-address-guard: through the proxy servers', () => {
   let upstream: HttpServer
   let upstreamPort: number
   let upstreamHits: string[]
-  let denials: Array<{ host: string; port: number; reason: string }>
+  let denials: Denial[]
   const closers: Array<() => Promise<unknown> | unknown> = []
 
   beforeEach(async () => {
@@ -377,8 +448,7 @@ describe('resolved-address-guard: through the proxy servers', () => {
   ): Promise<number> {
     const proxy = createHttpProxyServer({
       filter: () => true,
-      lookup: guard.lookup,
-      onDirectDialDenied: info => denials.push(info),
+      lookupFor: recordingLookupFor(guard, denials),
     })
     proxy.listen(0, '127.0.0.1')
     await once(proxy, 'listening')
@@ -416,15 +486,16 @@ describe('resolved-address-guard: through the proxy servers', () => {
         `Host: rebind.example.com:${upstreamPort}\r\nConnection: close\r\n\r\n`,
     )
     expect(resp.startsWith('HTTP/1.1 403')).toBe(true)
-    expect(resp).toContain(`X-Proxy-Error: ${RESOLVED_ADDRESS_DENIED_TAG}`)
-    expect(resp).toContain('resolved to a denied address')
+    expect(resp).toContain('X-Proxy-Error: blocked-by-sandbox-runtime')
+    expect(resp).toContain(
+      'Connection to rebind.example.com blocked: resolved to denied address 127.0.0.1',
+    )
     expect(upstreamHits).toEqual([])
     expect(denials).toEqual([
       {
         host: 'rebind.example.com',
         port: upstreamPort,
         reason: 'resolved to denied address 127.0.0.1',
-        encodedCommand: undefined,
       },
     ])
   })
@@ -454,7 +525,10 @@ describe('resolved-address-guard: through the proxy servers', () => {
 
   it('plain HTTP: a permitted resolution dials the resolved address with the Host header preserved', async () => {
     const proxyPort = await startHttpProxy(
-      createResolvedAddressGuard({ resolve, allowed: ['127.0.0.1'] }),
+      createResolvedAddressGuard({
+        resolve,
+        allowed: [{ range: '127.0.0.1', port: upstreamPort }],
+      }),
     )
     const resp = await rawExchange(
       proxyPort,
@@ -490,7 +564,8 @@ describe('resolved-address-guard: through the proxy servers', () => {
       `CONNECT rebind.example.com:${upstreamPort} HTTP/1.1\r\nHost: rebind.example.com:${upstreamPort}\r\n\r\n`,
     )
     expect(resp.startsWith('HTTP/1.1 403')).toBe(true)
-    expect(resp).toContain(`X-Proxy-Error: ${RESOLVED_ADDRESS_DENIED_TAG}`)
+    expect(resp).toContain('X-Proxy-Error: blocked-by-sandbox-runtime')
+    expect(resp).toContain('resolved to denied address 127.0.0.1')
     expect(denials.map(d => `${d.host}:${d.port}`)).toEqual([
       `rebind.example.com:${upstreamPort}`,
     ])
@@ -534,8 +609,7 @@ describe('resolved-address-guard: through the proxy servers', () => {
   ): Promise<number> {
     const wrapper = createSocksProxyServer({
       filter: () => true,
-      lookup: guard.lookup,
-      onDirectDialDenied: info => denials.push(info),
+      lookupFor: recordingLookupFor(guard, denials),
     })
     const tcp: TcpServer = createTcpServer((s: Socket) =>
       wrapper.handleConnection(s),
@@ -590,7 +664,6 @@ describe('resolved-address-guard: through the proxy servers', () => {
         host: 'rebind.example.com',
         port: upstreamPort,
         reason: 'resolved to denied address 127.0.0.1',
-        encodedCommand: undefined,
       },
     ])
   })
@@ -649,7 +722,7 @@ describe('resolved-address-guard: TLS-terminated upstream leg', () => {
   const UP_HOST = 'devbox.example.com'
   let upstream: ReturnType<typeof createHttpsServer>
   let upstreamPort: number
-  let denials: Array<{ host: string; port: number; reason: string }>
+  let denials: Denial[]
   const closers: Array<() => Promise<unknown>> = []
 
   beforeEach(async () => {
@@ -678,14 +751,13 @@ describe('resolved-address-guard: TLS-terminated upstream leg', () => {
   })
 
   async function startTerminatingProxy(
-    guard: ReturnType<typeof createResolvedAddressGuard>,
+    guard: ResolvedAddressGuard,
   ): Promise<number> {
     const proxy = createHttpProxyServer({
       filter: () => true,
       mitmCA: ca,
       tlsTerminateUpstreamCA: CA_PEM,
-      lookup: guard.lookup,
-      onDirectDialDenied: info => denials.push(info),
+      lookupFor: recordingLookupFor(guard, denials),
     })
     await new Promise<void>(r => proxy.listen(0, '127.0.0.1', () => r()))
     closers.push(
@@ -733,7 +805,7 @@ describe('resolved-address-guard: TLS-terminated upstream leg', () => {
     const r = await curl(proxyPort, `https://${UP_HOST}:${upstreamPort}/secret`)
     expect(r.out).toContain('HTTP/1.1 403')
     expect(r.out.toLowerCase()).toContain(
-      `x-proxy-error: ${RESOLVED_ADDRESS_DENIED_TAG}`,
+      'x-proxy-error: blocked-by-sandbox-runtime',
     )
     expect(r.out).not.toContain('tls-upstream-ok')
     expect(denials).toEqual([
@@ -741,15 +813,53 @@ describe('resolved-address-guard: TLS-terminated upstream leg', () => {
         host: UP_HOST,
         port: upstreamPort,
         reason: 'resolved to denied address 127.0.0.1',
-        encodedCommand: undefined,
       },
     ])
+  })
+
+  it('non-TLS bytes after the sniff path already answered 200: denied dial closes the tunnel and records the violation', async () => {
+    const proxyPort = await startTerminatingProxy(
+      createResolvedAddressGuard({
+        resolve: fakeResolver({ [UP_HOST]: ['127.0.0.1'] }),
+      }),
+    )
+    const sock = connect({ host: '127.0.0.1', port: proxyPort })
+    await once(sock, 'connect')
+    sock.write(
+      `CONNECT ${UP_HOST}:${upstreamPort} HTTP/1.1\r\nHost: ${UP_HOST}:${upstreamPort}\r\n\r\n`,
+    )
+    let buf = ''
+    sock.on('data', d => {
+      buf += d.toString('latin1')
+      if (buf.includes('Connection Established') && !buf.includes('sent')) {
+        buf += 'sent'
+        sock.write('SSH-2.0-OpenSSH_9.7\r\n')
+      }
+    })
+    await Promise.race([
+      once(sock, 'close'),
+      new Promise(r => setTimeout(r, 3000)),
+    ])
+    expect(buf.startsWith('HTTP/1.1 200')).toBe(true)
+    expect(buf).not.toContain('403') // a status line now would land inside the tunnel
+    expect(sock.destroyed || sock.readableEnded).toBe(true)
+    expect(denials).toEqual([
+      {
+        host: UP_HOST,
+        port: upstreamPort,
+        reason: 'resolved to denied address 127.0.0.1',
+      },
+    ])
+    sock.destroy()
   })
 
   it('permitted resolution: dials the resolved address, verifies the certificate against the name', async () => {
     const resolve = fakeResolver({ [UP_HOST]: ['127.0.0.1'] })
     const proxyPort = await startTerminatingProxy(
-      createResolvedAddressGuard({ resolve, allowed: ['127.0.0.1'] }),
+      createResolvedAddressGuard({
+        resolve,
+        allowed: [{ range: '127.0.0.1', port: upstreamPort }],
+      }),
     )
     const r = await curl(proxyPort, `https://${UP_HOST}:${upstreamPort}/app`)
     expect(r.exit).toBe(0)

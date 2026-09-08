@@ -22,11 +22,7 @@ import { connect as tlsConnect } from 'node:tls'
 import { URL } from 'node:url'
 import { logForDebugging } from '../utils/debug.js'
 import type { ParentProxyConfig } from './sandbox-config.js'
-import {
-  addressInSet,
-  isLoopbackAddress,
-  parseAddressRange,
-} from './resolved-address-guard.js'
+import { addRange, addressInSet, isLoopbackAddress } from './address.js'
 
 export interface ResolvedParentProxy {
   httpUrl?: URL
@@ -135,8 +131,7 @@ function parseNoProxy(raw: string): NoProxyRules {
     // CIDR? A malformed one is ignored (do NOT treat as suffix; `/` isn't
     // a valid hostname char).
     if (entry.includes('/')) {
-      const range = parseAddressRange(entry)
-      if (range) rules.cidr.addSubnet(range.address, range.prefix, range.family)
+      addRange(rules.cidr, entry)
       continue
     }
 
@@ -147,21 +142,15 @@ function parseNoProxy(raw: string): NoProxyRules {
     const bracketed = /^\[([^\]]+)\](?::\d+)?$/.exec(v)
     if (bracketed) v = bracketed[1]!
     if (v.startsWith('*.')) v = v.slice(1)
-    const bareFam = isIP(v)
-    if (!bareFam) {
+    if (!isIP(v)) {
       const colon = v.lastIndexOf(':')
       if (colon !== -1 && /^\d+$/.test(v.slice(colon + 1))) {
         v = v.slice(0, colon)
       }
-    } else {
-      // Bare IP literal — store as an exact-match /32 or /128 CIDR so that
-      // lookups go through BlockList rather than string suffix matching.
-      try {
-        rules.cidr.addAddress(v, bareFam === 6 ? 'ipv6' : 'ipv4')
-        continue
-      } catch {
-        // fall through to suffix push
-      }
+    } else if (addRange(rules.cidr, v)) {
+      // Bare IP literal — an exact-match /32 or /128 rule, so lookups go
+      // through BlockList rather than string suffix matching.
+      continue
     }
     rules.suffixes.push(v)
   }
@@ -457,35 +446,20 @@ export function canonicalizeHost(h: string): string | undefined {
   }
 }
 
-export interface DialDirectOptions {
-  timeoutMs?: number
-  /**
-   * Custom name resolution for hostname destinations — the manager passes
-   * the resolved-address guard's `lookup` so an allow-listed name that
-   * resolves into denied address space is refused instead of dialed. The
-   * runtime connects to the addresses this returns (no second resolution)
-   * and keeps its usual multi-address fallback.
-   */
-  lookup?: LookupFunction
-}
-
 /**
  * Dial `host:port` directly with a bounded timeout. Shared by the HTTP and
  * SOCKS direct-connect paths so they get the same timeout behaviour as the
- * CONNECT-tunnelled paths.
+ * CONNECT-tunnelled paths. `lookup` is the resolved-address guard's (see
+ * resolved-address-guard.ts); the runtime dials what it returns.
  */
 export function dialDirect(
   host: string,
   port: number,
-  opts: DialDirectOptions = {},
+  lookup?: LookupFunction,
+  timeoutMs = CONNECT_TIMEOUT_MS,
 ): Promise<Socket> {
-  const timeoutMs = opts.timeoutMs ?? CONNECT_TIMEOUT_MS
   return new Promise((resolve, reject) => {
-    const s = netConnect({
-      port,
-      host,
-      ...(opts.lookup ? { lookup: opts.lookup } : {}),
-    })
+    const s = netConnect({ port, host, lookup })
     let settled = false
     const done = (err?: Error) => {
       if (settled) return

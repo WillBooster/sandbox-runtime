@@ -1,8 +1,9 @@
-import type { LookupFunction, Socket } from 'net'
+import type { Socket } from 'net'
 import { createServer } from '@pondwader/socks5-server'
 import { logForDebugging } from '../utils/debug.js'
 import type { ResolvedParentProxy } from './parent-proxy.js'
 import { isResolvedAddressDenied } from './resolved-address-guard.js'
+import type { DirectLookup } from './http-proxy.js'
 import {
   canonicalizeHost,
   connectViaParentProxy,
@@ -35,21 +36,8 @@ export interface SocksProxyServerOptions {
    */
   parentProxy?: ResolvedParentProxy
 
-  /**
-   * Name resolution for direct dials (see HttpProxyServerOptions.lookup).
-   * A hostname that resolves into denied address space is answered with
-   * SOCKS "connection not allowed by ruleset" instead of being dialed. Not
-   * consulted for the parentProxy route.
-   */
-  lookup?: LookupFunction
-
-  /** Called when a direct dial is refused by `lookup`; see the HTTP proxy's twin. */
-  onDirectDialDenied?: (info: {
-    host: string
-    port: number
-    reason: string
-    encodedCommand?: string
-  }) => void
+  /** Direct-dial name resolution (see HttpProxyServerOptions.lookupFor); a refusal is answered "not allowed by ruleset". */
+  lookupFor?: DirectLookup
 
   /**
    * Per-session token (same value as the HTTP proxy's). When set, the
@@ -183,7 +171,11 @@ export function createSocksProxyServer(
 
     const open = parentUrl
       ? connectViaParentProxy(parentUrl, host, port)
-      : dialDirect(host, port, { lookup: options.lookup })
+      : dialDirect(
+          host,
+          port,
+          options.lookupFor?.(port, encodedCommandFromProxyUser(conn.username)),
+        )
 
     open
       .then(upstream => {
@@ -203,18 +195,13 @@ export function createSocksProxyServer(
           `SOCKS connect to ${host}:${port} failed: ${(err as Error).message}`,
           { level: 'error' },
         )
-        const denied = isResolvedAddressDenied(err)
-        if (denied) {
-          options.onDirectDialDenied?.({
-            host,
-            port,
-            reason: err.reason,
-            encodedCommand: encodedCommandFromProxyUser(conn.username),
-          })
-        }
         if (!clientGone) {
           try {
-            sendStatus(denied ? 'CONNECTION_NOT_ALLOWED' : 'HOST_UNREACHABLE')
+            sendStatus(
+              isResolvedAddressDenied(err)
+                ? 'CONNECTION_NOT_ALLOWED'
+                : 'HOST_UNREACHABLE',
+            )
           } catch {
             // socket may have closed between the check and the write
           }

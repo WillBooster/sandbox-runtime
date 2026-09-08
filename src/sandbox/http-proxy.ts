@@ -11,7 +11,9 @@ import { encodedCommandFromProxyUser } from './sandbox-utils.js'
 import { CRL_PATH, type MitmCA } from './mitm-ca.js'
 import {
   decideAndRespond,
+  rawDenied,
   respondDenied,
+  respondUpstreamError,
   type FilterRequestCallback,
   type MutateForwardedHeaders,
 } from './request-filter.js'
@@ -25,11 +27,7 @@ import {
 } from './body-substitution.js'
 import type { PlanSigv4 } from './credential-aws-pairs.js'
 import type { ResolvedParentProxy } from './parent-proxy.js'
-import {
-  isResolvedAddressDenied,
-  RESOLVED_ADDRESS_DENIED_BODY,
-  RESOLVED_ADDRESS_DENIED_TAG,
-} from './resolved-address-guard.js'
+import { isResolvedAddressDenied } from './resolved-address-guard.js'
 import {
   canonicalizeHost,
   connectViaParentProxy,
@@ -41,6 +39,12 @@ import {
   stripBrackets,
   stripHopByHop,
 } from './parent-proxy.js'
+
+/** Per-dial name resolution: see {@link HttpProxyServerOptions.lookupFor}. */
+export type DirectLookup = (
+  port: number,
+  encodedCommand?: string,
+) => LookupFunction
 
 export interface HttpProxyServerOptions {
   /**
@@ -181,25 +185,14 @@ export interface HttpProxyServerOptions {
 
   /**
    * Name resolution for DIRECT dials (opaque CONNECT tunnel, plain-HTTP
-   * forward, TLS-terminated upstream leg). The manager passes the
-   * resolved-address guard's `lookup` so an allow-listed hostname that
-   * resolves to a loopback / link-local / configured-private address is
-   * refused (403, `X-Proxy-Error: blocked-by-resolved-address`) rather than
-   * dialed. Not consulted for the mitmProxy or parentProxy routes — that
-   * hop resolves the name.
+   * forward, TLS-terminated upstream leg), bound per destination port and
+   * requesting command. The manager returns the resolved-address guard's
+   * lookup, which refuses (and records) an allow-listed hostname that
+   * resolves into denied address space; the proxy answers that with a 403.
+   * Not consulted for the mitmProxy or parentProxy routes — that hop
+   * resolves the name.
    */
-  lookup?: LookupFunction
-
-  /**
-   * Called when a direct dial is refused by `lookup`, so the manager can
-   * record it in the SandboxViolationStore like a host-allowlist denial.
-   */
-  onDirectDialDenied?: (info: {
-    host: string
-    port: number
-    reason: string
-    encodedCommand?: string
-  }) => void
+  lookupFor?: DirectLookup
 
   /**
    * Per-session bearer token. When set, every CONNECT and absolute-URI
@@ -456,11 +449,10 @@ export function createHttpProxyServer(options: HttpProxyServerOptions): Server {
           level: 'error',
         })
         endWithStatus(
-          'HTTP/1.1 403 Forbidden\r\n' +
-            'Content-Type: text/plain\r\n' +
-            'X-Proxy-Error: blocked-by-allowlist\r\n' +
-            '\r\n' +
+          rawDenied(
             'Connection blocked by network allowlist',
+            'blocked-by-allowlist',
+          ),
         )
         return
       }
@@ -483,6 +475,7 @@ export function createHttpProxyServer(options: HttpProxyServerOptions): Server {
       // the (already-validated, so practically unreachable) case where
       // canonicalization fails, so the two layers can never disagree.
       const hostname = canonicalizeHost(requestedHost) ?? requestedHost
+      const lookup = options.lookupFor?.(port, auth.encodedCommand)
 
       // Decide upstream route:
       //   in-process TLS termination
@@ -522,7 +515,7 @@ export function createHttpProxyServer(options: HttpProxyServerOptions): Server {
               hostname,
               port,
               upstreamCA: options.tlsTerminateUpstreamCA,
-              lookup: options.lookup,
+              lookup,
               onFilterRequestDeny: options.onFilterRequestDenied
                 ? (method, url, reason) =>
                     options.onFilterRequestDenied!({
@@ -532,13 +525,6 @@ export function createHttpProxyServer(options: HttpProxyServerOptions): Server {
                       encodedCommand: auth.encodedCommand,
                     })
                 : undefined,
-              onDialDenied: reason =>
-                options.onDirectDialDenied?.({
-                  host: hostname,
-                  port,
-                  reason,
-                  encodedCommand: auth.encodedCommand,
-                }),
             },
             options.planSigv4,
             options.maxSigv4ResignBodyBytes,
@@ -581,34 +567,17 @@ export function createHttpProxyServer(options: HttpProxyServerOptions): Server {
         } else if (parentUrl) {
           upstream = await connectViaParentProxy(parentUrl, hostname, port)
         } else {
-          upstream = await dialDirect(hostname, port, {
-            lookup: options.lookup,
-          })
+          upstream = await dialDirect(hostname, port, lookup)
         }
       } catch (err) {
         logForDebugging(`CONNECT tunnel failed: ${(err as Error).message}`, {
           level: 'error',
         })
-        const denied = isResolvedAddressDenied(err)
-        if (denied) {
-          options.onDirectDialDenied?.({
-            host: hostname,
-            port,
-            reason: err.reason,
-            encodedCommand: auth.encodedCommand,
-          })
-        }
         // If we already sent 200 (mitmCA sniff path), an HTTP status line now
         // would land inside the tunnel as payload. Just close.
         if (wrote200) socket.destroy()
-        else if (denied) {
-          endWithStatus(
-            'HTTP/1.1 403 Forbidden\r\n' +
-              'Content-Type: text/plain\r\n' +
-              `X-Proxy-Error: ${RESOLVED_ADDRESS_DENIED_TAG}\r\n` +
-              '\r\n' +
-              RESOLVED_ADDRESS_DENIED_BODY,
-          )
+        else if (isResolvedAddressDenied(err)) {
+          endWithStatus(rawDenied(err.message))
         } else endWithStatus('HTTP/1.1 502 Bad Gateway\r\n\r\n')
         return
       }
@@ -730,11 +699,11 @@ export function createHttpProxyServer(options: HttpProxyServerOptions): Server {
           res.destroy()
           return
         }
-        res.writeHead(403, {
-          'Content-Type': 'text/plain',
-          'X-Proxy-Error': 'blocked-by-allowlist',
-        })
-        res.end('Connection blocked by network allowlist')
+        respondDenied(
+          res,
+          'Connection blocked by network allowlist',
+          'blocked-by-allowlist',
+        )
         return
       }
 
@@ -913,7 +882,7 @@ export function createHttpProxyServer(options: HttpProxyServerOptions): Server {
             path: url.pathname + url.search,
             method: req.method,
             headers: fwdHeaders,
-            ...(options.lookup ? { lookup: options.lookup } : {}),
+            lookup: options.lookupFor?.(port, auth.encodedCommand),
             // No shared pool: a kept-alive socket is reused without consulting
             // `lookup`, and the global agent is shared with the embedding process.
             agent: false,
@@ -938,24 +907,7 @@ export function createHttpProxyServer(options: HttpProxyServerOptions): Server {
         logForDebugging(`Proxy request failed: ${err.message}`, {
           level: 'error',
         })
-        if (isResolvedAddressDenied(err)) {
-          options.onDirectDialDenied?.({
-            host: hostname,
-            port,
-            reason: err.reason,
-            encodedCommand: auth.encodedCommand,
-          })
-          respondDenied(
-            res,
-            RESOLVED_ADDRESS_DENIED_BODY,
-            RESOLVED_ADDRESS_DENIED_TAG,
-          )
-        } else if (!res.headersSent) {
-          res.writeHead(502, { 'Content-Type': 'text/plain' })
-          res.end('Bad Gateway')
-        } else {
-          res.destroy()
-        }
+        respondUpstreamError(res, err)
       })
 
       // Tear down the upstream request if the client goes away mid-flight.

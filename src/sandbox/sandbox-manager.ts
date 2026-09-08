@@ -1,4 +1,4 @@
-import { createHttpProxyServer } from './http-proxy.js'
+import { createHttpProxyServer, type DirectLookup } from './http-proxy.js'
 import { createSocksProxyServer } from './socks-proxy.js'
 import type { SocksProxyWrapper } from './socks-proxy.js'
 import { createMuxProxyServer, type MuxProxyServer } from './mux-proxy.js'
@@ -97,6 +97,7 @@ import {
   resolveParentProxy,
 } from './parent-proxy.js'
 import {
+  ipLiteralRules,
   matchesDomainPattern,
   matchesDomainPatternWithPort,
   stripDomainPatternPort,
@@ -105,6 +106,7 @@ import type { ChildProcess } from 'node:child_process'
 import type { ResolvedParentProxy } from './parent-proxy.js'
 import {
   createResolvedAddressGuard,
+  isResolvedAddressDenied,
   type ResolvedAddressGuard,
 } from './resolved-address-guard.js'
 import { EOL } from 'node:os'
@@ -131,11 +133,7 @@ let cleanupRegistered = false
 let logMonitorShutdown: (() => void) | undefined
 let linuxMonitor: LinuxViolationMonitor | undefined
 let parentProxy: ResolvedParentProxy | undefined
-/**
- * Address policy for hostname destinations the proxies dial directly.
- * Rebuilt by initialize()/updateConfig(); the proxies call through
- * {@link guardedLookup} so a config update applies to the next dial.
- */
+/** Read live through {@link directLookup}, so a config update applies to the next dial. */
 let resolvedAddressGuard: ResolvedAddressGuard = createResolvedAddressGuard()
 let mitmCA: MitmCA | undefined
 /**
@@ -281,30 +279,48 @@ function recordProxyViolation(
   })
 }
 
+function recordOutboundDeny(
+  host: string,
+  port: number,
+  reason: string,
+  encodedCommand?: string,
+): void {
+  recordProxyViolation(
+    `deny network-outbound ${host}:${port} (${reason})`,
+    encodedCommand,
+  )
+}
+
+/**
+ * The lists already say which addresses are off-limits or explicitly fine:
+ * an IP literal in deniedDomains is denied however it is reached, and a
+ * name may resolve to a denied address only if that literal is allow-listed.
+ */
 function buildResolvedAddressGuard(
   network: SandboxRuntimeConfig['network'],
 ): ResolvedAddressGuard {
   return createResolvedAddressGuard({
-    denied: network.deniedResolvedAddresses,
-    allowed: network.allowedResolvedAddresses,
+    denied: [
+      ...(network.deniedResolvedAddresses ?? []),
+      ...ipLiteralRules(network.deniedDomains),
+    ],
+    allowed: ipLiteralRules(network.allowedDomains),
   })
 }
 
-/** `lookup` handed to the proxies; reads the current guard on every dial. */
-const guardedLookup: ResolvedAddressGuard['lookup'] = (...args) =>
-  resolvedAddressGuard.lookup(...args)
-
-function recordDirectDialDenied(info: {
-  host: string
-  port: number
-  reason: string
-  encodedCommand?: string
-}): void {
-  recordProxyViolation(
-    `deny network-outbound ${info.host}:${info.port} (${info.reason})`,
-    info.encodedCommand,
-  )
-}
+/** Direct-dial `lookup` for the proxies: the current guard's, with a refusal recorded as a violation. */
+const directLookup: DirectLookup =
+  (port, encodedCommand) => (hostname, options, callback) =>
+    resolvedAddressGuard.lookupFor(port)(
+      hostname,
+      options,
+      (err, address, family) => {
+        if (isResolvedAddressDenied(err)) {
+          recordOutboundDeny(hostname, port, err.reason, encodedCommand)
+        }
+        callback(err, address, family)
+      },
+    )
 
 /**
  * The request URL as it should appear in a model-visible violation line:
@@ -335,10 +351,7 @@ async function filterNetworkRequest(
   encodedCommand?: string,
 ): Promise<boolean> {
   const denied = (reason: string): false => {
-    recordProxyViolation(
-      `deny network-outbound ${host}:${port} (${reason})`,
-      encodedCommand,
-    )
+    recordOutboundDeny(host, port, reason, encodedCommand)
     return false
   }
 
@@ -573,8 +586,7 @@ async function startMuxProxyServer(
     // injection: the real signature must not travel over plaintext.
     planSigv4: buildSigv4Planner(),
     parentProxy,
-    lookup: guardedLookup,
-    onDirectDialDenied: recordDirectDialDenied,
+    lookupFor: directLookup,
     proxyAuthToken,
   })
 
@@ -582,8 +594,7 @@ async function startMuxProxyServer(
     filter: (port, host, encodedCommand) =>
       filterNetworkRequest(port, host, sandboxAskCallback, encodedCommand),
     parentProxy,
-    lookup: guardedLookup,
-    onDirectDialDenied: recordDirectDialDenied,
+    lookupFor: directLookup,
     proxyAuthToken,
     probeUnauthenticated: async (port, host) => {
       // Explicit deny rules only: an unauthenticated peer must never reach
@@ -596,10 +607,7 @@ async function startMuxProxyServer(
           const reason =
             config.network.deniedDomainReasons?.[entry] ??
             'host is on the deny list'
-          recordProxyViolation(
-            `deny network-outbound ${host}:${port} (${reason})`,
-            undefined,
-          )
+          recordOutboundDeny(host, port, reason)
           return { deniedReason: reason }
         }
       }
@@ -1977,9 +1985,8 @@ function updateConfig(newConfig: SandboxRuntimeConfig): void {
       { level: 'warn' },
     )
   }
-  // Built before anything is swapped: a malformed range throws here and
-  // leaves the previous config fully in effect. Unlike parentProxy below,
-  // the proxies read this live, so it applies to the next dial.
+  // Built before anything is swapped, so a malformed range leaves the
+  // previous config fully in effect.
   const nextGuard = buildResolvedAddressGuard(newConfig.network)
   // Deep clone the config to avoid mutations. structuredClone cannot clone
   // functions, so pull filterRequest out, clone the rest, and put it back —

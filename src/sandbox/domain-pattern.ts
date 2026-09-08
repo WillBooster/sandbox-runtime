@@ -66,6 +66,20 @@ function parsePortSuffix(suffix: string): number | undefined {
   return port > 65535 ? undefined : port
 }
 
+/**
+ * The IP-literal entries of an allow/deny list as `{ range, port? }` rules
+ * for the resolved-address check: an address the list names explicitly is
+ * judged the same way when a hostname resolves to it.
+ */
+export function ipLiteralRules(
+  entries: readonly string[],
+): Array<{ range: string; port?: number }> {
+  return entries.flatMap(entry => {
+    const { hostPattern, port } = splitDomainPatternPort(entry)
+    return isIP(hostPattern) ? [{ range: hostPattern, port }] : []
+  })
+}
+
 /** Drop a `:port` suffix, if any (see {@link splitDomainPatternPort}). */
 export function stripDomainPatternPort(pattern: string): string {
   return splitDomainPatternPort(pattern).hostPattern
