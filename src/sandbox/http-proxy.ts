@@ -914,6 +914,9 @@ export function createHttpProxyServer(options: HttpProxyServerOptions): Server {
             method: req.method,
             headers: fwdHeaders,
             ...(options.lookup ? { lookup: options.lookup } : {}),
+            // No shared pool: a kept-alive socket is reused without consulting
+            // `lookup`, and the global agent is shared with the embedding process.
+            agent: false,
           },
           proxyRes => {
             // The response stream errors independently of proxyReq (e.g.
