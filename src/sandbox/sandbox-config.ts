@@ -745,7 +745,7 @@ export const NetworkConfigSchema = z.object({
     .optional()
     .describe(
       'IP addresses / CIDR ranges an allowed HOSTNAME must not resolve to, in addition to the built-in set ' +
-        '(loopback, unspecified, link-local, multicast, broadcast). A permitted name that resolves only into ' +
+        "(loopback, unspecified, link-local, multicast, broadcast, this host's own interface addresses). A permitted name that resolves only into " +
         'these is refused instead of dialed; e.g. ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"] ' +
         'keeps allow-listed names out of private address space. Does not apply to allowlist entries that are ' +
         'IP literals, and is not evaluated for connections routed through parentProxy or mitmProxy (that hop resolves the name).',

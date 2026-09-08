@@ -13,25 +13,29 @@
  *
  * Scope: hostnames only. An IP literal on the allowlist is an explicit
  * choice and is never re-judged here. The reserved loopback names
- * (`localhost` and anything under `.localhost`, RFC 6761) may resolve to
- * loopback — that is what allow-listing them asks for — but to nothing else
- * in the denied set. Connections routed through a parent proxy or a MITM
- * socket are not resolved locally at all; that hop resolves the name and is
- * responsible for its own address policy.
+ * (`localhost` and anything under `.localhost`, RFC 6761) resolve to
+ * loopback — that is what allow-listing them asks for — and to nothing
+ * else. Connections routed through a parent proxy or a MITM socket are not
+ * resolved locally at all; that hop resolves the name and is responsible for
+ * its own address policy.
  */
 
 import { lookup as dnsLookup } from 'node:dns'
 import type { LookupAddress, LookupAllOptions } from 'node:dns'
 import { BlockList, isIP } from 'node:net'
 import type { LookupFunction } from 'node:net'
+import { networkInterfaces } from 'node:os'
 import { logForDebugging } from '../utils/debug.js'
 
 /**
  * Destinations an allow-listed hostname may not resolve to unless the
  * embedder carves them out. IPv4 entries also cover their IPv4-mapped IPv6
- * form (see {@link unmapIPv4}). Private-use ranges (RFC 1918, ULA, CGNAT)
- * are deliberately absent: allow-listing an intranet hostname is legitimate,
- * so those are opt-in via `network.deniedResolvedAddresses`.
+ * form (see {@link canonicalAddress}). Addresses assigned to this host's own
+ * interfaces are denied too (see {@link localInterfaceAddresses}), since a
+ * service bound to 0.0.0.0 answers on those exactly as on loopback.
+ * Private-use ranges (RFC 1918, ULA, CGNAT) are deliberately absent:
+ * allow-listing an intranet hostname is legitimate, so those are opt-in via
+ * `network.deniedResolvedAddresses`.
  */
 export const DEFAULT_DENIED_RESOLVED_ADDRESSES: readonly string[] = [
   '0.0.0.0/8', // "this host on this network"; connects to the local host on common stacks
@@ -39,11 +43,28 @@ export const DEFAULT_DENIED_RESOLVED_ADDRESSES: readonly string[] = [
   '169.254.0.0/16', // link-local, incl. cloud instance-metadata endpoints
   '224.0.0.0/4', // multicast
   '255.255.255.255', // limited broadcast
+  '100.100.100.200', // instance-metadata endpoint outside link-local (Alibaba Cloud)
   '::', // unspecified; connects to the local host on common stacks
   '::1', // loopback
   'fe80::/10', // link-local
   'ff00::/8', // multicast
+  'fd00:ec2::254', // instance-metadata endpoint outside link-local (EC2 IPv6)
 ]
+
+/** Unicast addresses currently assigned to this host's network interfaces. */
+export function localInterfaceAddresses(): string[] {
+  let byInterface: ReturnType<typeof networkInterfaces>
+  try {
+    byInterface = networkInterfaces()
+  } catch {
+    // Interface enumeration is unavailable in some restricted environments;
+    // the fixed denied set still applies.
+    return []
+  }
+  return Object.values(byInterface)
+    .flat()
+    .flatMap(i => (i ? [canonicalAddress(i.address)] : []))
+}
 
 /** `X-Proxy-Error` tag and response body used when a dial is refused here. */
 export const RESOLVED_ADDRESS_DENIED_TAG = 'blocked-by-resolved-address'
@@ -94,8 +115,6 @@ export function buildAddressSet(entries: readonly string[]): BlockList {
         `Invalid IP address or CIDR range: ${JSON.stringify(entry)}`,
       )
     }
-    // Single addresses via addAddress: some runtimes mis-evaluate
-    // full-length (/32, /128) subnet rules.
     if (range.prefix === (range.family === 'ipv6' ? 128 : 32)) {
       list.addAddress(range.address, range.family)
     } else list.addSubnet(range.address, range.prefix, range.family)
@@ -104,21 +123,24 @@ export function buildAddressSet(entries: readonly string[]): BlockList {
 }
 
 /**
- * An IPv4-mapped IPv6 address (`::ffff:127.0.0.1`, `::ffff:7f00:1`) as its
- * dotted-quad IPv4 form; anything else unchanged. Lets IPv4 rules judge the
- * mapped spelling without relying on the runtime's BlockList to cross-match
- * families.
+ * Comparison form of an address: IPv4 unchanged; IPv6 with any zone id
+ * dropped (a zoned address is a BlockList non-match on some runtimes),
+ * canonically compressed and lower-cased, and an IPv4-mapped address
+ * (`::ffff:127.0.0.1`, `::FFFF:7f00:1`) as its dotted-quad IPv4 form so
+ * IPv4 rules judge it. Non-IP input is returned unchanged.
  */
-export function unmapIPv4(address: string): string {
-  if (isIP(address) !== 6) return address
+export function canonicalAddress(address: string): string {
+  const pct = address.indexOf('%')
+  const bare = pct === -1 ? address : address.slice(0, pct)
+  if (isIP(bare) !== 6) return bare
   let canonical: string
   try {
-    canonical = new URL(`http://[${address}]/`).hostname.slice(1, -1)
+    canonical = new URL(`http://[${bare}]/`).hostname.slice(1, -1)
   } catch {
-    return address
+    return bare
   }
   const m = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(canonical)
-  if (!m) return address
+  if (!m) return canonical
   const hi = parseInt(m[1]!, 16)
   const lo = parseInt(m[2]!, 16)
   return `${hi >> 8}.${hi & 0xff}.${lo >> 8}.${lo & 0xff}`
@@ -126,7 +148,7 @@ export function unmapIPv4(address: string): string {
 
 /** BlockList membership for an address string of either family. */
 export function addressInSet(list: BlockList, address: string): boolean {
-  const addr = unmapIPv4(address)
+  const addr = canonicalAddress(address)
   const fam = isIP(addr)
   return fam !== 0 && list.check(addr, fam === 6 ? 'ipv6' : 'ipv4')
 }
@@ -185,14 +207,21 @@ export interface ResolvedAddressGuardOptions {
   allowed?: readonly string[]
   /** Name resolver; defaults to `dns.lookup`. Test seam. */
   resolve?: Resolver
+  /** This host's interface addresses; defaults to {@link localInterfaceAddresses}, read per lookup. Test seam. */
+  localAddresses?: () => readonly string[]
 }
 
 export interface ResolvedAddressGuard {
   /**
    * Whether a connection to `hostname` may use resolved `address`. Always
-   * true when `hostname` is itself an IP literal.
+   * true when `hostname` is itself an IP literal. `local` defaults to the
+   * host's current interface addresses.
    */
-  permits(hostname: string, address: string): boolean
+  permits(
+    hostname: string,
+    address: string,
+    local?: ReadonlySet<string>,
+  ): boolean
   /**
    * Drop-in `lookup` for `net.connect` / `http(s).request`: resolves via the
    * configured resolver, removes addresses `permits` rejects, and fails with
@@ -210,15 +239,21 @@ export function createResolvedAddressGuard(
   ])
   const allowed = buildAddressSet(opts.allowed ?? [])
   const resolve: Resolver = opts.resolve ?? dnsLookup
+  const localSet = (): ReadonlySet<string> =>
+    new Set((opts.localAddresses ?? localInterfaceAddresses)())
 
-  const permits = (hostname: string, address: string): boolean => {
+  const permits = (
+    hostname: string,
+    address: string,
+    local: ReadonlySet<string> = localSet(),
+  ): boolean => {
     if (isIP(hostname)) return true
     if (!isIP(address)) return false
     if (addressInSet(allowed, address)) return true
-    if (isLoopbackName(hostname) && addressInSet(LOOPBACK, address)) {
-      return true
-    }
-    return !addressInSet(denied, address)
+    if (isLoopbackName(hostname)) return addressInSet(LOOPBACK, address)
+    return (
+      !addressInSet(denied, address) && !local.has(canonicalAddress(address))
+    )
   }
 
   const lookup: LookupFunction = (hostname, options, callback) => {
@@ -235,7 +270,10 @@ export function createResolvedAddressGuard(
         callback(err, [])
         return
       }
-      const survivors = addresses.filter(a => permits(hostname, a.address))
+      const local = localSet()
+      const survivors = addresses.filter(a =>
+        permits(hostname, a.address, local),
+      )
       if (survivors.length < addresses.length) {
         const dropped = addresses
           .filter(a => !survivors.includes(a))

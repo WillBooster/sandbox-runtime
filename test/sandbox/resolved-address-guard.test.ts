@@ -14,6 +14,7 @@ import {
   DEFAULT_DENIED_RESOLVED_ADDRESSES,
   isResolvedAddressDenied,
   isValidAddressRange,
+  localInterfaceAddresses,
   parseAddressRange,
   RESOLVED_ADDRESS_DENIED_TAG,
   ResolvedAddressDeniedError,
@@ -114,8 +115,12 @@ describe('resolved-address-guard: parseAddressRange', () => {
   })
 })
 
+/** This host's interface addresses as the guard sees them in these tests. */
+const HOST_ADDRESSES = ['192.168.7.23', '2001:db8:7::23', '127.0.0.1', '::1']
+const localAddresses = (): string[] => HOST_ADDRESSES
+
 describe('resolved-address-guard: permits', () => {
-  const guard = createResolvedAddressGuard()
+  const guard = createResolvedAddressGuard({ localAddresses })
 
   it('denies the built-in set for a hostname, including v4-mapped forms', () => {
     for (const addr of [
@@ -124,19 +129,43 @@ describe('resolved-address-guard: permits', () => {
       '::1',
       '::ffff:127.0.0.1',
       '::ffff:7f00:1',
+      '0:0:0:0:0:FFFF:7F00:0001',
       '0.0.0.0',
       '169.254.169.254',
       '::ffff:169.254.169.254',
       '224.0.0.1',
       '239.255.255.250',
       '255.255.255.255',
+      '100.100.100.200',
       '::',
       'fe80::1',
+      'fe80::1%en0',
+      'fe80::1%1',
+      'FE80::ABCD',
       'febf::1',
       'ff02::1',
+      'fd00:ec2::254',
     ]) {
       expect(guard.permits('api.example.com', addr)).toBe(false)
     }
+  })
+
+  it("denies this host's own interface addresses, read at lookup time", () => {
+    expect(guard.permits('api.example.com', '192.168.7.23')).toBe(false)
+    expect(guard.permits('api.example.com', '::ffff:192.168.7.23')).toBe(false)
+    expect(guard.permits('api.example.com', '2001:DB8:7:0::23')).toBe(false)
+    expect(guard.permits('api.example.com', '192.168.7.24')).toBe(true)
+    let current = ['10.9.8.7']
+    const live = createResolvedAddressGuard({ localAddresses: () => current })
+    expect(live.permits('api.example.com', '10.9.8.7')).toBe(false)
+    current = []
+    expect(live.permits('api.example.com', '10.9.8.7')).toBe(true)
+    // A carve-out for the LAN address wins, like any other.
+    const carved = createResolvedAddressGuard({
+      localAddresses,
+      allowed: ['192.168.7.23'],
+    })
+    expect(carved.permits('nas.example.com', '192.168.7.23')).toBe(true)
   })
 
   it('permits public and (by default) private-use addresses for a hostname', () => {
@@ -160,18 +189,22 @@ describe('resolved-address-guard: permits', () => {
     expect(guard.permits('169.254.169.254', '169.254.169.254')).toBe(true)
   })
 
-  it('lets localhost names resolve to loopback but nothing else in the set', () => {
+  it('lets localhost names resolve to loopback and nothing else', () => {
     expect(guard.permits('localhost', '127.0.0.1')).toBe(true)
     expect(guard.permits('localhost', '::1')).toBe(true)
+    expect(guard.permits('localhost', '::ffff:127.0.0.1')).toBe(true)
     expect(guard.permits('LOCALHOST.', '127.0.0.1')).toBe(true)
     expect(guard.permits('app.dev.localhost', '127.0.0.1')).toBe(true)
     expect(guard.permits('localhost', '169.254.169.254')).toBe(false)
+    expect(guard.permits('app.localhost', '192.0.2.1')).toBe(false)
+    expect(guard.permits('app.localhost', '10.0.0.5')).toBe(false)
     expect(guard.permits('notlocalhost', '127.0.0.1')).toBe(false)
     expect(guard.permits('localhost.example.com', '127.0.0.1')).toBe(false)
   })
 
   it('applies embedder-configured denied ranges (and their v4-mapped twins)', () => {
     const g = createResolvedAddressGuard({
+      localAddresses,
       denied: ['10.0.0.0/8', '192.168.0.0/16', 'fc00::/7'],
     })
     expect(g.permits('intranet.example.com', '10.1.2.3')).toBe(false)
@@ -185,7 +218,10 @@ describe('resolved-address-guard: permits', () => {
   })
 
   it('allowed carve-outs win over the denied set', () => {
-    const g = createResolvedAddressGuard({ allowed: ['127.0.0.1'] })
+    const g = createResolvedAddressGuard({
+      localAddresses,
+      allowed: ['127.0.0.1'],
+    })
     expect(g.permits('myapp.test', '127.0.0.1')).toBe(true)
     expect(g.permits('myapp.test', '127.0.0.2')).toBe(false)
     expect(g.permits('myapp.test', '::1')).toBe(false)
@@ -202,6 +238,13 @@ describe('resolved-address-guard: permits', () => {
     expect(DEFAULT_DENIED_RESOLVED_ADDRESSES).toContain('127.0.0.0/8')
     expect(DEFAULT_DENIED_RESOLVED_ADDRESSES).toContain('169.254.0.0/16')
     expect(DEFAULT_DENIED_RESOLVED_ADDRESSES).not.toContain('10.0.0.0/8')
+  })
+
+  it("by default reads the machine's real interface addresses", () => {
+    const real = createResolvedAddressGuard()
+    for (const addr of localInterfaceAddresses()) {
+      expect(real.permits('api.example.com', addr)).toBe(false)
+    }
   })
 })
 
@@ -221,7 +264,7 @@ describe('resolved-address-guard: lookup', () => {
     const resolve = fakeResolver({
       'mixed.example.com': ['169.254.169.254', '2001:db8::5', '192.0.2.10'],
     })
-    const guard = createResolvedAddressGuard({ resolve })
+    const guard = createResolvedAddressGuard({ resolve, localAddresses })
     expect(await lookupAll(guard, 'mixed.example.com')).toEqual([
       { address: '2001:db8::5', family: 6 },
       { address: '192.0.2.10', family: 4 },
@@ -232,7 +275,7 @@ describe('resolved-address-guard: lookup', () => {
     const resolve = fakeResolver({
       'mixed.example.com': ['127.0.0.1', '192.0.2.10'],
     })
-    const guard = createResolvedAddressGuard({ resolve })
+    const guard = createResolvedAddressGuard({ resolve, localAddresses })
     const got = await new Promise<[string, number | undefined]>((res, rej) =>
       guard.lookup('mixed.example.com', {}, (err, address, family) =>
         err ? rej(err) : res([address as string, family]),
