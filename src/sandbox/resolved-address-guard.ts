@@ -63,7 +63,7 @@ export function localInterfaceAddresses(): string[] {
   }
   return Object.values(byInterface)
     .flat()
-    .flatMap(i => (i ? [canonicalAddress(i.address)] : []))
+    .flatMap(i => (i ? [i.address] : []))
 }
 
 /** `X-Proxy-Error` tag and response body used when a dial is refused here. */
@@ -240,7 +240,9 @@ export function createResolvedAddressGuard(
   const allowed = buildAddressSet(opts.allowed ?? [])
   const resolve: Resolver = opts.resolve ?? dnsLookup
   const localSet = (): ReadonlySet<string> =>
-    new Set((opts.localAddresses ?? localInterfaceAddresses)())
+    new Set(
+      (opts.localAddresses ?? localInterfaceAddresses)().map(canonicalAddress),
+    )
 
   const permits = (
     hostname: string,
