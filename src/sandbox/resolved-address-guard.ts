@@ -55,25 +55,26 @@ export const CLOUD_METADATA_ADDRESSES: readonly string[] = [
 ]
 
 /**
- * Destinations an allow-listed hostname may not resolve to. Addresses
- * assigned to this host's own interfaces are denied too (see
- * {@link localInterfaceAddresses}), since a service bound to 0.0.0.0 answers
- * on those exactly as on loopback. Private-use ranges (RFC 1918, ULA, CGNAT)
- * are deliberately absent: allow-listing an intranet hostname is legitimate,
- * so those are opt-in via `network.deniedResolvedAddresses`. IPv4 rules also
- * bind the IPv6 forms that carry an IPv4 address (see `embeddedIPv4`).
+ * Destinations an allow-listed hostname may not resolve to, grouped by the
+ * class a refusal reports. Addresses assigned to this host's own interfaces
+ * are denied too (see {@link localInterfaceAddresses}), since a service
+ * bound to 0.0.0.0 answers on those exactly as on loopback. Private-use
+ * ranges (RFC 1918, ULA, CGNAT) are deliberately absent: allow-listing an
+ * intranet hostname is legitimate, so those are opt-in via
+ * `network.deniedResolvedAddresses`. IPv4 rules also bind the IPv6 forms
+ * that carry an IPv4 address (see `embeddedIPv4`).
  */
-export const DEFAULT_DENIED_RESOLVED_ADDRESSES: readonly string[] = [
-  ...LOOPBACK_RANGES,
-  '0.0.0.0/8', // "this host on this network"; connects to the local host on common stacks
-  '169.254.0.0/16', // link-local, incl. most cloud instance-metadata endpoints
-  '224.0.0.0/4', // multicast
-  '255.255.255.255', // limited broadcast
-  '::', // unspecified; connects to the local host on common stacks
-  'fe80::/10', // link-local
-  'ff00::/8', // multicast
-  ...CLOUD_METADATA_ADDRESSES,
+const DENIED_CLASSES: ReadonlyArray<readonly [string, readonly string[]]> = [
+  ['a loopback address', LOOPBACK_RANGES],
+  ['an unspecified address', ['0.0.0.0/8', '::']], // connects to the local host on common stacks
+  ['a link-local address', ['169.254.0.0/16', 'fe80::/10']], // incl. most instance-metadata endpoints
+  ['a multicast address', ['224.0.0.0/4', 'ff00::/8']],
+  ['the broadcast address', ['255.255.255.255']],
+  ['a cloud metadata address', CLOUD_METADATA_ADDRESSES],
 ]
+
+export const DEFAULT_DENIED_RESOLVED_ADDRESSES: readonly string[] =
+  DENIED_CLASSES.flatMap(([, ranges]) => ranges)
 
 /** Unicast addresses currently assigned to this host's network interfaces. */
 export function localInterfaceAddresses(): string[] {
@@ -92,16 +93,19 @@ export function localInterfaceAddresses(): string[] {
 
 export class ResolvedAddressDeniedError extends Error {
   readonly code = 'ERR_SRT_RESOLVED_ADDRESS_DENIED'
-  /** Parenthetical for the violation line, e.g. `resolved to denied address 127.0.0.1`. */
-  readonly reason: string
+  /**
+   * @param reason parenthetical for the violation line and the client, e.g.
+   *   `resolved to a loopback address` — the class, never the address, which
+   *   the sandboxed client should not learn from a refusal.
+   * @param addresses the refused addresses, for operator logs.
+   */
   constructor(
     readonly hostname: string,
+    readonly reason: string,
     readonly addresses: readonly string[],
   ) {
-    const reason = `resolved to denied address ${addresses.join(', ')}`
     super(`Connection to ${hostname} blocked: ${reason}`)
     this.name = 'ResolvedAddressDeniedError'
-    this.reason = reason
   }
 }
 
@@ -188,10 +192,12 @@ export function createResolvedAddressGuard(
 ): ResolvedAddressGuard {
   const refused = buildRuleSet(ipLiteralRules(opts.deniedDomains ?? []))
   const allowed = buildRuleSet(ipLiteralRules(opts.allowedDomains ?? []))
-  const denied = buildRuleSet([
-    ...DEFAULT_DENIED_RESOLVED_ADDRESSES,
-    ...(opts.deniedResolvedAddresses ?? []),
-  ])
+  const denied: Array<readonly [string, RuleSet]> = [
+    ...DENIED_CLASSES.map(
+      ([why, ranges]) => [why, buildRuleSet(ranges)] as const,
+    ),
+    ['a listed address', buildRuleSet(opts.deniedResolvedAddresses ?? [])],
+  ]
   const resolve: Resolver = opts.resolve ?? dnsLookup
   /** This host's addresses right now; a malformed entry from the seam is skipped. */
   const localSet = (): BlockList => {
@@ -202,24 +208,30 @@ export function createResolvedAddressGuard(
     return list
   }
 
-  const judge = (
+  /** Why `hostname:port` may not use resolved `address`, or undefined if it may. */
+  const denial = (
     hostname: string,
     address: string,
     port: number,
     local: BlockList,
-  ): boolean => {
-    if (isIP(hostname)) return true
-    if (!isIP(address)) return false
+  ): string | undefined => {
+    if (isIP(hostname)) return undefined
+    if (!isIP(address)) return 'an unparsable address'
     // A NAT64 / 6to4 / IPv4-compatible answer is delivered to the IPv4
     // address it carries, so it is judged under both spellings.
     const v4 = embeddedIPv4(address)
     const forms = v4 === undefined ? [address] : [address, v4]
-    if (forms.some(a => inRuleSet(refused, a, port))) return false
-    if (forms.some(a => inRuleSet(allowed, a, port))) return true
-    if (isLoopbackName(hostname)) return isLoopbackAddress(address)
-    return !forms.some(
-      a => inRuleSet(denied, a, port) || addressInSet(local, a),
-    )
+    const hits = (set: RuleSet) => forms.some(a => inRuleSet(set, a, port))
+    if (hits(refused)) return 'a deny-listed address'
+    if (hits(allowed)) return undefined
+    if (isLoopbackName(hostname)) {
+      return isLoopbackAddress(address) ? undefined : 'a non-loopback address'
+    }
+    const why = denied.find(([, set]) => hits(set))?.[0]
+    if (why) return why
+    if (forms.some(a => addressInSet(local, a)))
+      return "one of this host's addresses"
+    return undefined
   }
 
   const lookupFor =
@@ -233,25 +245,34 @@ export function createResolvedAddressGuard(
         const local = localSet()
         const kept: LookupAddress[] = []
         const dropped: string[] = []
+        const whys = new Set<string>()
         for (const a of addresses) {
-          if (judge(hostname, a.address, port, local)) kept.push(a)
-          else dropped.push(a.address)
+          const why = denial(hostname, a.address, port, local)
+          if (why === undefined) kept.push(a)
+          else {
+            dropped.push(a.address)
+            whys.add(why)
+          }
+        }
+        if (dropped.length) {
+          logForDebugging(
+            `Denied address(es) for ${hostname}:${port}: ${dropped.join(', ')} (${[...whys].join('; ')})`,
+          )
         }
         const first = kept[0]
         if (!first) {
           // An empty answer without an error is possible from some resolvers.
           const none: NodeJS.ErrnoException = dropped.length
-            ? new ResolvedAddressDeniedError(hostname, dropped)
+            ? new ResolvedAddressDeniedError(
+                hostname,
+                `resolved to ${[...whys].join(' / ')}`,
+                dropped,
+              )
             : Object.assign(new Error(`getaddrinfo ENOTFOUND ${hostname}`), {
                 code: 'ENOTFOUND',
               })
           callback(none, [])
           return
-        }
-        if (dropped.length) {
-          logForDebugging(
-            `Skipping denied address(es) for ${hostname}: ${dropped.join(', ')}`,
-          )
         }
         if (options.all) callback(null, kept)
         else callback(null, first.address, first.family)
@@ -260,7 +281,7 @@ export function createResolvedAddressGuard(
 
   return {
     permits: (hostname, address, port) =>
-      judge(hostname, address, port, localSet()),
+      denial(hostname, address, port, localSet()) === undefined,
     lookupFor,
   }
 }

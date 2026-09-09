@@ -408,8 +408,47 @@ describe('resolved-address-guard: lookup', () => {
     expect(err).toBeInstanceOf(ResolvedAddressDeniedError)
     expect(isResolvedAddressDenied(err)).toBe(true)
     expect(err.code).toBe('ERR_SRT_RESOLVED_ADDRESS_DENIED')
-    expect(err.reason).toBe('resolved to denied address 127.0.0.1, ::1')
+    expect(err.reason).toBe('resolved to a loopback address')
+    expect(err.addresses).toEqual(['127.0.0.1', '::1'])
+    expect(err.message).not.toContain('127.0.0.1')
     expect(err.hostname).toBe('evil.example.com')
+  })
+
+  it('names the class of the refused addresses, never the addresses', async () => {
+    const resolve = fakeResolver({
+      'meta.example.com': ['169.254.169.254', 'fd20:ce::254'],
+      'lan.example.com': ['192.168.7.23'],
+      'db.example.com': ['10.1.2.3'],
+      'ssh.example.com': ['192.0.2.5'],
+      'app.localhost': ['192.0.2.9'],
+    })
+    const guard = createResolvedAddressGuard({
+      resolve,
+      localAddresses,
+      deniedResolvedAddresses: ['10.0.0.0/8'],
+      deniedDomains: ['192.0.2.5:22'],
+    })
+    const reasonFor = (host: string, port = 443) =>
+      lookupAll(guard, host, port).then(
+        () => 'permitted',
+        e => (e as ResolvedAddressDeniedError).reason,
+      )
+    expect(await reasonFor('meta.example.com')).toBe(
+      'resolved to a link-local address / a cloud metadata address',
+    )
+    expect(await reasonFor('lan.example.com')).toBe(
+      "resolved to one of this host's addresses",
+    )
+    expect(await reasonFor('db.example.com')).toBe(
+      'resolved to a listed address',
+    )
+    expect(await reasonFor('ssh.example.com', 22)).toBe(
+      'resolved to a deny-listed address',
+    )
+    expect(await reasonFor('ssh.example.com', 443)).toBe('permitted')
+    expect(await reasonFor('app.localhost')).toBe(
+      'resolved to a non-loopback address',
+    )
   })
 
   it('returns only the surviving addresses, in resolver order', async () => {
@@ -629,14 +668,14 @@ describe('resolved-address-guard: through the proxy servers', () => {
     expect(resp.startsWith('HTTP/1.1 403')).toBe(true)
     expect(resp).toContain('X-Proxy-Error: blocked-by-sandbox-runtime')
     expect(resp).toContain(
-      'Connection to rebind.example.com blocked: resolved to denied address 127.0.0.1',
+      'Connection to rebind.example.com blocked: resolved to a loopback address',
     )
     expect(upstreamHits).toEqual([])
     expect(denials).toEqual([
       {
         host: 'rebind.example.com',
         port: upstreamPort,
-        reason: 'resolved to denied address 127.0.0.1',
+        reason: 'resolved to a loopback address',
       },
     ])
   })
@@ -717,7 +756,7 @@ describe('resolved-address-guard: through the proxy servers', () => {
       `GET http://intranet.example.com/ HTTP/1.1\r\nHost: intranet.example.com\r\nConnection: close\r\n\r\n`,
     )
     expect(resp.startsWith('HTTP/1.1 403')).toBe(true)
-    expect(denials[0]?.reason).toBe('resolved to denied address 10.20.30.40')
+    expect(denials[0]?.reason).toBe('resolved to a listed address')
   })
 
   it('CONNECT: allow-listed name resolving to loopback gets 403 instead of a tunnel', async () => {
@@ -728,7 +767,8 @@ describe('resolved-address-guard: through the proxy servers', () => {
     )
     expect(resp.startsWith('HTTP/1.1 403')).toBe(true)
     expect(resp).toContain('X-Proxy-Error: blocked-by-sandbox-runtime')
-    expect(resp).toContain('resolved to denied address 127.0.0.1')
+    expect(resp).toContain('resolved to a loopback address')
+    expect(resp).not.toContain('127.0.0.1')
     expect(denials.map(d => `${d.host}:${d.port}`)).toEqual([
       `rebind.example.com:${upstreamPort}`,
     ])
@@ -741,9 +781,7 @@ describe('resolved-address-guard: through the proxy servers', () => {
       `CONNECT metadata.example.com:80 HTTP/1.1\r\nHost: metadata.example.com:80\r\n\r\n`,
     )
     expect(resp.startsWith('HTTP/1.1 403')).toBe(true)
-    expect(denials[0]?.reason).toBe(
-      'resolved to denied address 169.254.169.254',
-    )
+    expect(denials[0]?.reason).toBe('resolved to a link-local address')
   })
 
   it('CONNECT: an allow-listed IP literal still tunnels', async () => {
@@ -826,7 +864,7 @@ describe('resolved-address-guard: through the proxy servers', () => {
       {
         host: 'rebind.example.com',
         port: upstreamPort,
-        reason: 'resolved to denied address 127.0.0.1',
+        reason: 'resolved to a loopback address',
       },
     ])
   })
@@ -986,7 +1024,7 @@ describe('resolved-address-guard: TLS-terminated upstream leg', () => {
       {
         host: UP_HOST,
         port: upstreamPort,
-        reason: 'resolved to denied address 127.0.0.1',
+        reason: 'resolved to a loopback address',
       },
     ])
   })
@@ -1021,7 +1059,7 @@ describe('resolved-address-guard: TLS-terminated upstream leg', () => {
       {
         host: UP_HOST,
         port: upstreamPort,
-        reason: 'resolved to denied address 127.0.0.1',
+        reason: 'resolved to a loopback address',
       },
     ])
     sock.destroy()
