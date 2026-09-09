@@ -18,7 +18,7 @@
  * IP literal on the deny list is refused by name too, allowlist or not. The
  * reserved loopback names (`localhost` and anything under `.localhost`,
  * RFC 6761) resolve to loopback — that is what allow-listing them asks for —
- * and to nothing else. Connections routed through a parent proxy or a MITM
+ * or to an allow-listed literal, and to nothing else. Connections routed through a parent proxy or a MITM
  * socket are not resolved locally at all; that hop resolves the name and is
  * responsible for its own address policy.
  */

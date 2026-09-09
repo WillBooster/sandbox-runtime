@@ -131,8 +131,10 @@ export function mappedIPv4(address: string): string | undefined {
  * The IPv4 address an IPv6 address carries in one of the forms a network
  * delivers to that IPv4 destination: IPv4-mapped and IPv4-compatible
  * (`::ffff:0:0/96`, `::/96`), IPv4-translated (`::ffff:0:0:0/96`), the
- * NAT64 well-known prefixes (`64:ff9b::/96`, `64:ff9b:1::/48`) and 6to4
- * (`2002::/16`). Undefined for any other address.
+ * NAT64 well-known prefix (`64:ff9b::/96`), a /96 inside the local-use
+ * prefix `64:ff9b:1::/48`, and 6to4 (`2002::/16`). Undefined for any other
+ * address — including a local-use address whose low 32 bits are zero, which
+ * is a shorter RFC 6052 layout that puts the IPv4 address elsewhere.
  */
 export function embeddedIPv4(address: string): string | undefined {
   const g = ipv6Groups(address)
@@ -141,8 +143,10 @@ export function embeddedIPv4(address: string): string | undefined {
     g.slice(from, to).every(x => x === 0)
   if (g[0] === 0x2002) return dottedQuad(g[1]!, g[2]!)
   const low = dottedQuad(g[6]!, g[7]!)
-  if (g[0] === 0x64 && g[1] === 0xff9b && (g[2] === 1 || (!g[2] && zero(3, 6))))
-    return low
+  if (g[0] === 0x64 && g[1] === 0xff9b) {
+    if (!g[2] && zero(3, 6)) return low
+    return g[2] === 1 && !zero(6, 8) ? low : undefined
+  }
   if (zero(0, 5) && (g[5] === 0 || g[5] === 0xffff)) return low
   if (zero(0, 4) && g[4] === 0xffff && g[5] === 0) return low
   return undefined

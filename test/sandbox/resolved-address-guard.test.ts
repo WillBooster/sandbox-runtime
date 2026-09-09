@@ -174,7 +174,8 @@ describe('address: embeddedIPv4', () => {
       ['::ffff:0:a9fe:a9fe', '169.254.169.254'], // IPv4-translated
       ['64:ff9b::7f00:1', '127.0.0.1'], // NAT64 well-known prefix
       ['64:ff9b::8.8.8.8', '8.8.8.8'],
-      ['64:ff9b:1:abcd:e::a00:5', '10.0.0.5'], // NAT64 local-use prefix
+      ['64:ff9b:1:abcd:e::a00:5', '10.0.0.5'], // a /96 inside the local-use prefix
+      ['64:ff9b:1:808:8:800::', undefined], // local-use /48 layout: IPv4 is not in the low bits
       ['2002:c0a8:717::1', '192.168.7.23'], // 6to4
       ['2002:7f00:1:5::9%en0', '127.0.0.1'],
       ['::1', '0.0.0.1'],
@@ -273,6 +274,7 @@ describe('resolved-address-guard: permits', () => {
       '2002:c000:20a::1',
       '2001:db8::7f00:1',
       '64:ff9b:0:1::7f00:1',
+      '64:ff9b:1:808:8:800::', // 8.8.8.8 in the local-use /48 layout
     ]) {
       expect([addr, guard.permits('api.example.com', addr, 443)]).toEqual([
         addr,
