@@ -208,6 +208,8 @@ describe('resolved-address-guard: permits', () => {
       '239.255.255.250',
       '255.255.255.255',
       '100.100.100.200',
+      '168.63.129.16',
+      '192.0.0.192',
       '::',
       'fe80::1',
       'fe80::1%en0',
@@ -217,6 +219,10 @@ describe('resolved-address-guard: permits', () => {
       'febf::1',
       'ff02::1',
       'fd00:ec2::254',
+      'fd00:ec2::23',
+      'fd20:ce::254',
+      'fd00:c1::a9fe:a9fe',
+      'fd00:42::42',
     ]) {
       expect(guard.permits('api.example.com', addr, 443)).toBe(false)
     }
@@ -294,7 +300,9 @@ describe('resolved-address-guard: permits', () => {
       '172.16.0.1',
       '192.168.1.1',
       'fd00::1',
+      'fd20:ce::1',
       '100.64.0.1',
+      '192.0.0.8',
     ]) {
       expect(guard.permits('api.example.com', addr, 443)).toBe(true)
     }

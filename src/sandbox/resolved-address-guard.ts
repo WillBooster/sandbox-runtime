@@ -40,6 +40,21 @@ import {
 } from './address.js'
 
 /**
+ * Cloud instance-metadata / platform endpoints that live outside link-local
+ * space, so `169.254.0.0/16` / `fe80::/10` do not cover them. Single
+ * addresses (or a provider-reserved block), so nothing else is caught.
+ */
+export const CLOUD_METADATA_ADDRESSES: readonly string[] = [
+  '100.100.100.200', // Alibaba Cloud
+  '168.63.129.16', // Azure WireServer / host agent endpoint
+  '192.0.0.192', // Oracle Cloud Infrastructure Classic
+  'fd00:ec2::/32', // AWS IPv6 service block: IMDS ::254, EKS Pod Identity ::23, DNS, NTP
+  'fd20:ce::254', // Google Cloud, IPv6-only instances
+  'fd00:c1::a9fe:a9fe', // Oracle Cloud Infrastructure IPv6
+  'fd00:42::42', // Scaleway IPv6
+]
+
+/**
  * Destinations an allow-listed hostname may not resolve to. Addresses
  * assigned to this host's own interfaces are denied too (see
  * {@link localInterfaceAddresses}), since a service bound to 0.0.0.0 answers
@@ -51,14 +66,13 @@ import {
 export const DEFAULT_DENIED_RESOLVED_ADDRESSES: readonly string[] = [
   ...LOOPBACK_RANGES,
   '0.0.0.0/8', // "this host on this network"; connects to the local host on common stacks
-  '169.254.0.0/16', // link-local, incl. cloud instance-metadata endpoints
+  '169.254.0.0/16', // link-local, incl. most cloud instance-metadata endpoints
   '224.0.0.0/4', // multicast
   '255.255.255.255', // limited broadcast
-  '100.100.100.200', // instance-metadata endpoint outside link-local (Alibaba Cloud)
   '::', // unspecified; connects to the local host on common stacks
   'fe80::/10', // link-local
   'ff00::/8', // multicast
-  'fd00:ec2::254', // instance-metadata endpoint outside link-local (EC2 IPv6)
+  ...CLOUD_METADATA_ADDRESSES,
 ]
 
 /** Unicast addresses currently assigned to this host's network interfaces. */
