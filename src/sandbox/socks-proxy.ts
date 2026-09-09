@@ -1,9 +1,8 @@
 import type { Socket } from 'net'
 import { createServer } from '@pondwader/socks5-server'
 import { logForDebugging } from '../utils/debug.js'
-import type { ResolvedParentProxy } from './parent-proxy.js'
+import type { DirectLookup, ResolvedParentProxy } from './parent-proxy.js'
 import { isResolvedAddressDenied } from './resolved-address-guard.js'
-import type { DirectLookup } from './http-proxy.js'
 import {
   canonicalizeHost,
   connectViaParentProxy,

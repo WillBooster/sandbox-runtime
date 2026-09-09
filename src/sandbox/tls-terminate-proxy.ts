@@ -14,7 +14,7 @@ import {
   request as httpsRequest,
 } from 'node:https'
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { connect, isIP } from 'node:net'
+import { connect } from 'node:net'
 import type { LookupFunction } from 'node:net'
 import { unlink } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -34,7 +34,12 @@ import {
   type GetBodySubstitutions,
 } from './body-substitution.js'
 import { mintLeafCert, secureContextFor } from './mitm-leaf.js'
-import { directRequestHost, stripHopByHop } from './parent-proxy.js'
+import {
+  directRequestOptions,
+  type DirectRequestOptions,
+  formatAuthority,
+  stripHopByHop,
+} from './parent-proxy.js'
 import { sha256Hex } from './aws-sigv4.js'
 import type { PlanSigv4 } from './credential-aws-pairs.js'
 
@@ -344,6 +349,8 @@ async function forwardUpstream(
   // the CONNECT-verified target stays authoritative (same rationale as the
   // Host-header note below).
   const path = originFormPath(req.url)
+  // The tunnel target as it goes on the wire: filterRequest URL, Host, SigV4.
+  const authority = formatAuthority(target.hostname, target.port, 443)
   let body: Readable = req
   if (filterRequest) {
     const ac = new AbortController()
@@ -363,15 +370,11 @@ async function forwardUpstream(
     //
     // Always derive the URL from the verified CONNECT target so
     // filterRequest sees the actual upstream destination.
-    const host =
-      target.port === 443
-        ? target.hostname
-        : `${target.hostname}:${target.port}`
     const out = await decideAndRespond(
       filterRequest,
       req,
       res,
-      `https://${host}${path}`,
+      `https://${authority}${path}`,
       ac.signal,
       target.onFilterRequestDeny,
     )
@@ -398,11 +401,7 @@ async function forwardUpstream(
   // what carry the name: rebuild Host from the tunnel's target — the name the
   // allowlist saw — rather than forwarding the client's spelling.
   const fwdHeaders = stripHopByHop(req.headers)
-  const bracketedHost =
-    isIP(target.hostname) === 6 ? `[${target.hostname}]` : target.hostname
-  const hostHeader =
-    target.port === 443 ? bracketedHost : `${bracketedHost}:${target.port}`
-  fwdHeaders.host = hostHeader
+  fwdHeaders.host = authority
   // SigV4 planning runs on the PRE-substitution headers (the trigger is
   // the fake access key id in the credential scope, which the header
   // substitution below replaces) but on the POST-strip view: the plan's
@@ -486,7 +485,7 @@ async function forwardUpstream(
       fwdHeaders['content-length'] = String(bufferedBody.length)
     }
     try {
-      sigv4Plan.apply(fwdHeaders, hostHeader, payloadHash)
+      sigv4Plan.apply(fwdHeaders, authority, payloadHash)
     } catch (err) {
       // Fail closed on any signer error — a request the proxy claimed to
       // handle must not go upstream half-rewritten, and a client-crafted
@@ -520,14 +519,15 @@ async function forwardUpstream(
     fwdHeaders['transfer-encoding'] = 'chunked'
   }
 
-  // Vet and pick the upstream address first (see directRequestHost); the
-  // name stays in Host and SNI below.
-  let upstreamHost: string
+  // Vet and pick the upstream address first (see directRequestOptions); the
+  // name stays in Host and SNI.
+  let direct: DirectRequestOptions
   try {
-    upstreamHost = await directRequestHost(
+    direct = await directRequestOptions(
       target.hostname,
       target.port,
       target.lookup,
+      true,
     )
   } catch (err) {
     logForDebugging(
@@ -546,24 +546,14 @@ async function forwardUpstream(
   // TODO(terminating-tls): honour parentProxy for the upstream leg.
   const upstream = httpsRequest(
     {
-      host: upstreamHost,
-      port: target.port,
+      ...direct,
       path,
       method: req.method,
       headers: fwdHeaders,
       // We're a TLS-terminating proxy, not a trust boundary for the upstream
-      // server's identity — let the runtime do normal verification against
-      // system roots (and NODE_EXTRA_CA_CERTS). `host` is an address, so
-      // servername is what SNI and certificate verification use; SNI cannot
-      // carry an IP literal, and Bun's https.request treats `servername:
-      // undefined` differently from omitting the key, so spread conditionally.
-      ...(isIP(target.hostname) ? {} : { servername: target.hostname }),
+      // server's identity — the runtime verifies it normally (system roots and
+      // NODE_EXTRA_CA_CERTS) against `direct.servername`, the tunnel's target.
       ...(target.upstreamCA ? { ca: target.upstreamCA } : {}),
-      // No global agent: a proxy's outbound leg shouldn't share a connection
-      // pool keyed on the proxy process. Also works around a Bun quirk where
-      // the first request's `ca:` value is cached on the global agent and
-      // subsequent calls with a different `ca:` are silently ignored.
-      agent: false,
     },
     upRes => {
       // The response stream errors independently of the ClientRequest;

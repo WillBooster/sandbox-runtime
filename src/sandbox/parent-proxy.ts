@@ -446,28 +446,66 @@ export function canonicalizeHost(h: string): string | undefined {
   }
 }
 
-/**
- * Upstream address for an `http(s).request` to `host:port` over the direct
- * route. The name is dialed exactly as a tunnel would be ({@link dialDirect}:
- * the guard's `lookup`, the connect timeout, the runtime's address-family
- * fallback), the address that answered is kept and the probe released; the
- * request then goes to that literal with the name carried in Host / SNI. So
- * the vetted address is the one requested, and `lookup` never reaches the
- * HTTP client — Bun's node:http client resolves through it but then drops or
- * repeats a streamed request body, and cannot adopt an already-open socket.
- * Without a `lookup` (or for an IP literal) the host is returned unchanged.
- */
-export async function directRequestHost(
+/** Per-dial name resolution the proxies are handed: the guard's `lookup` for `port`, refusals recorded. */
+export type DirectLookup = (
+  port: number,
+  encodedCommand?: string,
+) => LookupFunction
+
+/** `host[:port]` as it belongs in a Host header / URL authority: IPv6 bracketed, the default port elided. */
+export function formatAuthority(
   host: string,
   port: number,
-  lookup?: LookupFunction,
-): Promise<string> {
-  if (!lookup || isIP(host)) return host
-  const probe = await dialDirect(host, port, lookup)
-  const address = probe.remoteAddress
-  probe.destroy()
-  if (!address) throw new Error(`connect ${host}:${port}: no peer address`)
-  return address
+  defaultPort: number,
+): string {
+  const bracketed = isIP(host) === 6 ? `[${host}]` : host
+  return port === defaultPort ? bracketed : `${bracketed}:${port}`
+}
+
+export interface DirectRequestOptions {
+  host: string
+  port: number
+  servername?: string
+  agent: false
+}
+
+/**
+ * Connection options for an `http(s).request` to `host:port` over the direct
+ * route. The name is dialed exactly as a tunnel would be ({@link dialDirect}:
+ * the guard's `lookup`, the connect timeout, the runtime's address-family
+ * fallback), the address that answered is kept and that connection released;
+ * the request then goes to the literal, with the name in SNI (callers keep it
+ * in Host). So the vetted address is the one requested and `lookup` never
+ * reaches the HTTP client: Bun's node:http client up to 1.3.x resolves through
+ * a custom `lookup` but then drops or repeats a streamed request body, and
+ * ignores `createConnection` (oven-sh/bun#7471), so the vetted socket cannot
+ * simply be adopted. Bun 1.4 rewrote that client (oven-sh/bun#31587); once it
+ * is the floor, hand the request the dialed socket and drop the second connect.
+ * No agent: the global pool is shared with the embedding process (and Bun
+ * caches the first request's `ca` on it), and the vetting dial runs per request
+ * anyway. Without a `lookup`, or for an IP literal, the host is used as given.
+ */
+export async function directRequestOptions(
+  host: string,
+  port: number,
+  lookup: LookupFunction | undefined,
+  tls: boolean,
+): Promise<DirectRequestOptions> {
+  let address = host
+  if (lookup && !isIP(host)) {
+    const probe = await dialDirect(host, port, lookup)
+    address = probe.remoteAddress ?? ''
+    probe.destroy()
+    if (!address) throw new Error(`connect ${host}:${port}: no peer address`)
+  }
+  // SNI cannot carry an IP literal, and Bun treats `servername: undefined`
+  // differently from an absent key.
+  return {
+    host: address,
+    port,
+    ...(tls && !isIP(host) ? { servername: host } : {}),
+    agent: false,
+  }
 }
 
 /**

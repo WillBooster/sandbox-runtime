@@ -130,7 +130,7 @@ export interface ResolvedAddressGuard {
    */
   permits(hostname: string, address: string, port: number): boolean
   /**
-   * `lookup` for a `net.connect` / `http(s).request` to `port`: resolves via
+   * `lookup` for a `net.connect` to `port` (see `dialDirect`): resolves via
    * the configured resolver, removes addresses `permits` rejects, and fails
    * with {@link ResolvedAddressDeniedError} when none remain.
    */

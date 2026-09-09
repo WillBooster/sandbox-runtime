@@ -1,4 +1,4 @@
-import { createHttpProxyServer, type DirectLookup } from './http-proxy.js'
+import { createHttpProxyServer } from './http-proxy.js'
 import { createSocksProxyServer } from './socks-proxy.js'
 import type { SocksProxyWrapper } from './socks-proxy.js'
 import { createMuxProxyServer, type MuxProxyServer } from './mux-proxy.js'
@@ -103,7 +103,7 @@ import {
   stripDomainPatternPort,
 } from './domain-pattern.js'
 import type { ChildProcess } from 'node:child_process'
-import type { ResolvedParentProxy } from './parent-proxy.js'
+import type { DirectLookup, ResolvedParentProxy } from './parent-proxy.js'
 import {
   createResolvedAddressGuard,
   isResolvedAddressDenied,

@@ -1,10 +1,10 @@
-import type { LookupFunction, Socket } from 'node:net'
+import type { Socket } from 'node:net'
 import type { Duplex, Readable } from 'node:stream'
 import type { Server } from 'node:http'
 import { Agent, createServer } from 'node:http'
 import { request as httpRequest } from 'node:http'
 import { request as httpsRequest } from 'node:https'
-import { connect, isIP } from 'node:net'
+import { connect } from 'node:net'
 import { URL } from 'node:url'
 import { logForDebugging } from '../utils/debug.js'
 import { encodedCommandFromProxyUser } from './sandbox-utils.js'
@@ -31,8 +31,11 @@ import { isResolvedAddressDenied } from './resolved-address-guard.js'
 import {
   canonicalizeHost,
   connectViaParentProxy,
-  directRequestHost,
+  directRequestOptions,
+  type DirectRequestOptions,
   dialDirect,
+  formatAuthority,
+  type DirectLookup,
   openConnectTunnel,
   proxyAuthHeader,
   selectParentProxyUrl,
@@ -40,12 +43,6 @@ import {
   stripBrackets,
   stripHopByHop,
 } from './parent-proxy.js'
-
-/** Per-dial name resolution: see {@link HttpProxyServerOptions.lookupFor}. */
-export type DirectLookup = (
-  port: number,
-  encodedCommand?: string,
-) => LookupFunction
 
 export interface HttpProxyServerOptions {
   /**
@@ -723,9 +720,11 @@ export function createHttpProxyServer(options: HttpProxyServerOptions): Server {
       // host we allowlist-checked, not the client's spelling of it. `url.port`
       // is '' when the scheme default was given or implied, matching the
       // `url.host` form this replaces.
-      const authority =
-        (isIP(hostname) === 6 ? `[${hostname}]` : hostname) +
-        (url.port ? `:${url.port}` : '')
+      const authority = formatAuthority(
+        hostname,
+        port,
+        url.protocol === 'https:' ? 443 : 80,
+      )
 
       const fwdHeaders = { ...stripHopByHop(req.headers), host: authority }
       options.mutateHeadersPlaintext?.(fwdHeaders, hostname)
@@ -876,13 +875,15 @@ export function createHttpProxyServer(options: HttpProxyServerOptions): Server {
         )
       } else {
         // Vet and pick the upstream address before any request object exists
-        // (see directRequestHost); the name stays in Host and, for TLS, SNI.
-        let upstreamHost: string
+        // (see directRequestOptions); the name stays in Host and, for TLS, SNI.
+        const isHttps = url.protocol === 'https:'
+        let direct: DirectRequestOptions
         try {
-          upstreamHost = await directRequestHost(
+          direct = await directRequestOptions(
             hostname,
             port,
             options.lookupFor?.(port, auth.encodedCommand),
+            isHttps,
           )
         } catch (err) {
           logForDebugging(`Proxy request failed: ${(err as Error).message}`, {
@@ -896,19 +897,12 @@ export function createHttpProxyServer(options: HttpProxyServerOptions): Server {
           body.destroy()
           return
         }
-        const isHttps = url.protocol === 'https:'
         proxyReq = (isHttps ? httpsRequest : httpRequest)(
           {
-            hostname: upstreamHost,
-            port,
+            ...direct,
             path: url.pathname + url.search,
             method: req.method,
             headers: fwdHeaders,
-            ...(isHttps && !isIP(hostname) ? { servername: hostname } : {}),
-            // No shared pool: a kept-alive socket would be reused for whatever
-            // name mapped to this address, and the global agent is shared with
-            // the embedding process.
-            agent: false,
           },
           proxyRes => {
             // The response stream errors independently of proxyReq (e.g.
