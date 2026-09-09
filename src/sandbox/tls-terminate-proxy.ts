@@ -519,6 +519,13 @@ async function forwardUpstream(
     fwdHeaders['transfer-encoding'] = 'chunked'
   }
 
+  const failUpstream = (err: Error) => {
+    logForDebugging(
+      `[tls-terminate] upstream ${target.hostname}:${target.port} failed: ${err.message}`,
+      { level: 'error' },
+    )
+    respondUpstreamError(res, err)
+  }
   // Vet and pick the upstream address first (see directRequestOptions); the
   // name stays in Host and SNI.
   let direct: DirectRequestOptions
@@ -530,14 +537,10 @@ async function forwardUpstream(
       true,
     )
   } catch (err) {
-    logForDebugging(
-      `[tls-terminate] upstream ${target.hostname}:${target.port} failed: ${(err as Error).message}`,
-      { level: 'error' },
-    )
-    respondUpstreamError(res, err as Error)
+    failUpstream(err as Error)
     return
   }
-  if (res.destroyed) {
+  if (res.destroyed || req.socket.destroyed) {
     // Client went away during the dial.
     body.destroy()
     return
@@ -570,13 +573,7 @@ async function forwardUpstream(
     },
   )
 
-  upstream.on('error', err => {
-    logForDebugging(
-      `[tls-terminate] upstream ${target.hostname}:${target.port} failed: ${err.message}`,
-      { level: 'error' },
-    )
-    respondUpstreamError(res, err)
-  })
+  upstream.on('error', failUpstream)
 
   res.on('close', () => upstream.destroy())
   if (bufferedBody !== undefined) {

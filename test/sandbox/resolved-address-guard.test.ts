@@ -749,11 +749,11 @@ describe('resolved-address-guard: through the proxy servers', () => {
 })
 
 // ---------------------------------------------------------------------------
-// TLS-terminated leg: the upstream https.request gets the same lookup. Driven
-// with curl (a real CONNECT-through-proxy client). The positive case relies
-// on the runtime verifying the upstream certificate against the hostname,
-// not the resolved IP, when a custom lookup is used — true for Node and for
-// Bun >= 1.3.11.
+// TLS-terminated leg: the upstream is dialed through the same lookup and the
+// request made to the vetted address, with the hostname in Host and SNI.
+// Driven with curl (a real CONNECT-through-proxy client). The positive case
+// relies on the runtime verifying the upstream certificate against
+// `servername` rather than the address — true for Node and Bun >= 1.3.11.
 // ---------------------------------------------------------------------------
 
 describe('resolved-address-guard: TLS-terminated upstream leg', () => {

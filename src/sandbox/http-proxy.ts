@@ -812,6 +812,12 @@ export function createHttpProxyServer(options: HttpProxyServerOptions): Server {
         fwdHeaders['transfer-encoding'] = 'chunked'
       }
 
+      const failUpstream = (err: Error) => {
+        logForDebugging(`Proxy request failed: ${err.message}`, {
+          level: 'error',
+        })
+        respondUpstreamError(res, err)
+      }
       let proxyReq
       if (mitmSocketPath) {
         logForDebugging(
@@ -886,10 +892,7 @@ export function createHttpProxyServer(options: HttpProxyServerOptions): Server {
             isHttps,
           )
         } catch (err) {
-          logForDebugging(`Proxy request failed: ${(err as Error).message}`, {
-            level: 'error',
-          })
-          respondUpstreamError(res, err as Error)
+          failUpstream(err as Error)
           return
         }
         if (res.destroyed || req.socket.destroyed) {
@@ -920,12 +923,7 @@ export function createHttpProxyServer(options: HttpProxyServerOptions): Server {
         )
       }
 
-      proxyReq.on('error', err => {
-        logForDebugging(`Proxy request failed: ${err.message}`, {
-          level: 'error',
-        })
-        respondUpstreamError(res, err)
-      })
+      proxyReq.on('error', failUpstream)
 
       // Tear down the upstream request if the client goes away mid-flight.
       res.on('close', () => proxyReq.destroy())
