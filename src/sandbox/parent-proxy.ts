@@ -22,7 +22,12 @@ import { connect as tlsConnect } from 'node:tls'
 import { URL } from 'node:url'
 import { logForDebugging } from '../utils/debug.js'
 import type { ParentProxyConfig } from './sandbox-config.js'
-import { addRange, addressInSet, isLoopbackAddress } from './address.js'
+import {
+  addRange,
+  addressInSet,
+  isLoopbackAddress,
+  mappedIPv4,
+} from './address.js'
 
 export interface ResolvedParentProxy {
   httpUrl?: URL
@@ -439,8 +444,10 @@ export function canonicalizeHost(h: string): string | undefined {
     // forms and IPv6 compression. It does NOT strip trailing dots or IPv6
     // brackets from the output, so we do that ourselves.
     const bracketed = isIP(bare) === 6 ? `[${bare}]` : bare
-    const out = new URL(`http://${bracketed}/`).hostname
-    return stripBrackets(out).replace(/\.$/, '')
+    const out = stripBrackets(new URL(`http://${bracketed}/`).hostname)
+    // An IPv4-mapped literal connects to that IPv4 address, so it is spelled
+    // as one: allow/deny entries and requests then compare equal.
+    return isIP(out) === 6 ? (mappedIPv4(out) ?? out) : out.replace(/\.$/, '')
   } catch {
     return undefined
   }

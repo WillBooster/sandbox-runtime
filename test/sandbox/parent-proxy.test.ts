@@ -402,6 +402,15 @@ describe('parent-proxy: canonicalizeHost', () => {
     expect(canonicalizeHost('[::1]')).toBe('::1')
   })
 
+  test('spells an IPv4-mapped IPv6 literal as the IPv4 address it connects to', () => {
+    expect(canonicalizeHost('::ffff:127.0.0.1')).toBe('127.0.0.1')
+    expect(canonicalizeHost('[::FFFF:A9FE:A9FE]')).toBe('169.254.169.254')
+    expect(canonicalizeHost('0:0:0:0:0:ffff:7f00:1')).toBe('127.0.0.1')
+    // Other IPv4-embedding forms are different destinations; left as IPv6.
+    expect(canonicalizeHost('::ffff:0:7f00:1')).toBe('::ffff:0:7f00:1')
+    expect(canonicalizeHost('64:ff9b::7f00:1')).toBe('64:ff9b::7f00:1')
+  })
+
   test('strips trailing dot and lowercases', () => {
     expect(canonicalizeHost('Example.COM.')).toBe('example.com')
   })
