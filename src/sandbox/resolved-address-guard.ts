@@ -14,7 +14,8 @@
  * Scope: hostnames only. An IP literal on the allowlist is an explicit
  * choice and is never re-judged here; conversely, a name may resolve to a
  * denied address only when that address (and port) is itself allow-listed,
- * so reaching it by name grants nothing the literal entry did not. The
+ * so reaching it by name grants nothing the literal entry did not — and an
+ * IP literal on the deny list is refused by name too, allowlist or not. The
  * reserved loopback names (`localhost` and anything under `.localhost`,
  * RFC 6761) resolve to loopback — that is what allow-listing them asks for —
  * and to nothing else. Connections routed through a parent proxy or a MITM
@@ -28,6 +29,7 @@ import { BlockList, isIP } from 'node:net'
 import type { LookupFunction } from 'node:net'
 import { networkInterfaces } from 'node:os'
 import { logForDebugging } from '../utils/debug.js'
+import { ipLiteralRules } from './domain-pattern.js'
 import {
   addRange,
   addressInSet,
@@ -104,21 +106,22 @@ export type Resolver = (
   ) => void,
 ) => void
 
-/**
- * An IP literal or CIDR range, optionally restricted to one destination
- * port. A bare string is shorthand for `{ range }` (any port).
- */
-export type AddressRule = string | { range: string; port?: number }
+/** An IP literal or CIDR range, optionally restricted to one destination port. */
+type AddressRule = string | { range: string; port?: number }
 
+/**
+ * The guard reads the same three lists the name filter does, in the same
+ * order of precedence: an IP literal in `deniedDomains` is refused however
+ * it is reached; an IP literal in `allowedDomains` (with its `:port`) is
+ * what a name MAY resolve to even though the address is otherwise denied —
+ * so a name reaches nothing the literal entry does not already permit; and
+ * `deniedResolvedAddresses` extends the built-in denied set.
+ */
 export interface ResolvedAddressGuardOptions {
-  /** Denied in addition to {@link DEFAULT_DENIED_RESOLVED_ADDRESSES} and this host's own addresses. */
-  denied?: readonly AddressRule[]
-  /**
-   * Addresses (and ports) a name MAY resolve to even though they are denied —
-   * the manager passes the allowlist's own IP-literal entries, so a name
-   * reaches nothing a literal entry does not already permit.
-   */
-  allowed?: readonly AddressRule[]
+  allowedDomains?: readonly string[]
+  deniedDomains?: readonly string[]
+  /** IPs / CIDRs denied in addition to {@link DEFAULT_DENIED_RESOLVED_ADDRESSES} and this host's own addresses. */
+  deniedResolvedAddresses?: readonly string[]
   /** Name resolver; defaults to `dns.lookup`. Test seam. */
   resolve?: Resolver
   /** This host's interface addresses; defaults to {@link localInterfaceAddresses}, read per lookup. Test seam. */
@@ -169,11 +172,12 @@ function inRuleSet(set: RuleSet, address: string, port: number): boolean {
 export function createResolvedAddressGuard(
   opts: ResolvedAddressGuardOptions = {},
 ): ResolvedAddressGuard {
+  const refused = buildRuleSet(ipLiteralRules(opts.deniedDomains ?? []))
+  const allowed = buildRuleSet(ipLiteralRules(opts.allowedDomains ?? []))
   const denied = buildRuleSet([
     ...DEFAULT_DENIED_RESOLVED_ADDRESSES,
-    ...(opts.denied ?? []),
+    ...(opts.deniedResolvedAddresses ?? []),
   ])
-  const allowed = buildRuleSet(opts.allowed ?? [])
   const resolve: Resolver = opts.resolve ?? dnsLookup
   /** This host's addresses right now; a malformed entry from the seam is skipped. */
   const localSet = (): BlockList => {
@@ -196,6 +200,7 @@ export function createResolvedAddressGuard(
     // address it carries, so it is judged under both spellings.
     const v4 = embeddedIPv4(address)
     const forms = v4 === undefined ? [address] : [address, v4]
+    if (forms.some(a => inRuleSet(refused, a, port))) return false
     if (forms.some(a => inRuleSet(allowed, a, port))) return true
     if (isLoopbackName(hostname)) return isLoopbackAddress(address)
     return !forms.some(

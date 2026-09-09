@@ -97,7 +97,6 @@ import {
   resolveParentProxy,
 } from './parent-proxy.js'
 import {
-  ipLiteralRules,
   matchesDomainPattern,
   matchesDomainPatternWithPort,
   stripDomainPatternPort,
@@ -289,23 +288,6 @@ function recordOutboundDeny(
     `deny network-outbound ${host}:${port} (${reason})`,
     encodedCommand,
   )
-}
-
-/**
- * The lists already say which addresses are off-limits or explicitly fine:
- * an IP literal in deniedDomains is denied however it is reached, and a
- * name may resolve to a denied address only if that literal is allow-listed.
- */
-function buildResolvedAddressGuard(
-  network: SandboxRuntimeConfig['network'],
-): ResolvedAddressGuard {
-  return createResolvedAddressGuard({
-    denied: [
-      ...(network.deniedResolvedAddresses ?? []),
-      ...ipLiteralRules(network.deniedDomains),
-    ],
-    allowed: ipLiteralRules(network.allowedDomains),
-  })
 }
 
 /** Direct-dial `lookup` for the proxies: the current guard's, with a refusal recorded as a violation. */
@@ -668,7 +650,7 @@ async function initialize(
         `https=${redactUrl(parentProxy.httpsUrl)}`,
     )
   }
-  resolvedAddressGuard = buildResolvedAddressGuard(runtimeConfig.network)
+  resolvedAddressGuard = createResolvedAddressGuard(runtimeConfig.network)
 
   // Load TLS-termination CA if configured. Throws on unreadable/non-PEM —
   // tlsTerminate is explicit opt-in, so a bad config is a hard error.
@@ -1987,7 +1969,7 @@ function updateConfig(newConfig: SandboxRuntimeConfig): void {
   }
   // Built before anything is swapped, so a malformed range leaves the
   // previous config fully in effect.
-  const nextGuard = buildResolvedAddressGuard(newConfig.network)
+  const nextGuard = createResolvedAddressGuard(newConfig.network)
   // Deep clone the config to avoid mutations. structuredClone cannot clone
   // functions, so pull filterRequest out, clone the rest, and put it back —
   // a function reference is immutable in the sense that matters here.

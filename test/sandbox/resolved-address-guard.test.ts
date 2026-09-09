@@ -24,7 +24,6 @@ import {
 } from '../../src/sandbox/http-proxy.js'
 import { createSocksProxyServer } from '../../src/sandbox/socks-proxy.js'
 import { SandboxRuntimeConfigSchema } from '../../src/sandbox/sandbox-config.js'
-import { ipLiteralRules } from '../../src/sandbox/domain-pattern.js'
 import { createMitmCA } from '../../src/sandbox/mitm-ca.js'
 import { mintLeafCert } from '../../src/sandbox/mitm-leaf.js'
 
@@ -240,7 +239,7 @@ describe('resolved-address-guard: permits', () => {
     // A carve-out for the LAN address wins, like any other.
     const carved = createResolvedAddressGuard({
       localAddresses,
-      allowed: ['192.168.7.23'],
+      allowedDomains: ['192.168.7.23'],
     })
     expect(carved.permits('nas.example.com', '192.168.7.23', 443)).toBe(true)
   })
@@ -277,8 +276,8 @@ describe('resolved-address-guard: permits', () => {
     // Embedder rules and literal carve-outs bind the embedded address too.
     const g = createResolvedAddressGuard({
       localAddresses,
-      denied: ['10.0.0.0/8'],
-      allowed: ['10.0.0.9'],
+      deniedResolvedAddresses: ['10.0.0.0/8'],
+      allowedDomains: ['10.0.0.9'],
     })
     expect(g.permits('intranet.example.com', '64:ff9b::a00:5', 443)).toBe(false)
     expect(g.permits('intranet.example.com', '64:ff9b::a00:9', 443)).toBe(true)
@@ -323,7 +322,7 @@ describe('resolved-address-guard: permits', () => {
   it('applies embedder-configured denied ranges (and their v4-mapped twins)', () => {
     const g = createResolvedAddressGuard({
       localAddresses,
-      denied: ['10.0.0.0/8', '192.168.0.0/16', 'fc00::/7'],
+      deniedResolvedAddresses: ['10.0.0.0/8', '192.168.0.0/16', 'fc00::/7'],
     })
     expect(g.permits('intranet.example.com', '10.1.2.3', 443)).toBe(false)
     expect(g.permits('intranet.example.com', '::ffff:10.1.2.3', 443)).toBe(
@@ -340,7 +339,7 @@ describe('resolved-address-guard: permits', () => {
   it('allowed carve-outs win over the denied set, per port when given one', () => {
     const g = createResolvedAddressGuard({
       localAddresses,
-      allowed: ['127.0.0.1', { range: '::1', port: 3000 }],
+      allowedDomains: ['127.0.0.1', '[::1]:3000'],
     })
     expect(g.permits('myapp.test', '127.0.0.1', 443)).toBe(true)
     expect(g.permits('myapp.test', '127.0.0.2', 443)).toBe(false)
@@ -351,8 +350,9 @@ describe('resolved-address-guard: permits', () => {
   it('an IPv4-mapped literal in either list binds exactly its IPv4 address', () => {
     const g = createResolvedAddressGuard({
       localAddresses,
-      allowed: ipLiteralRules(['[::ffff:127.0.0.1]:3000']),
-      denied: ['::ffff:10.0.0.1', ...ipLiteralRules(['[::ffff:10.0.0.2]'])],
+      allowedDomains: ['[::ffff:127.0.0.1]:3000'],
+      deniedResolvedAddresses: ['::ffff:10.0.0.1'],
+      deniedDomains: ['[::ffff:10.0.0.2]'],
     })
     expect(g.permits('myapp.test', '127.0.0.1', 3000)).toBe(true)
     expect(g.permits('myapp.test', '127.0.0.1', 3001)).toBe(false)
@@ -367,7 +367,8 @@ describe('resolved-address-guard: permits', () => {
   it('port-qualified denied rules apply to that port only', () => {
     const g = createResolvedAddressGuard({
       localAddresses,
-      denied: [{ range: '10.0.0.5', port: 22 }, '10.9.0.0/16'],
+      deniedDomains: ['10.0.0.5:22'],
+      deniedResolvedAddresses: ['10.9.0.0/16'],
     })
     expect(g.permits('git.example.com', '10.0.0.5', 22)).toBe(false)
     expect(g.permits('git.example.com', '10.0.0.5', 443)).toBe(true)
@@ -375,11 +376,11 @@ describe('resolved-address-guard: permits', () => {
   })
 
   it('throws on a malformed entry (schema validates first)', () => {
-    expect(() => createResolvedAddressGuard({ denied: ['nope/8'] })).toThrow(
-      /Invalid IP address or CIDR range/,
-    )
     expect(() =>
-      createResolvedAddressGuard({ allowed: [{ range: '[::1]', port: 80 }] }),
+      createResolvedAddressGuard({ deniedResolvedAddresses: ['nope/8'] }),
+    ).toThrow(/Invalid IP address or CIDR range/)
+    expect(() =>
+      createResolvedAddressGuard({ deniedResolvedAddresses: ['[::1]'] }),
     ).toThrow()
   })
 
@@ -481,28 +482,13 @@ describe('resolved-address-guard: config schema', () => {
     }
   })
 
-  it('derives the address rules from the IP-literal entries of the allow/deny lists', () => {
-    const rules = ipLiteralRules([
-      '*.example.com',
-      'localhost',
-      '127.0.0.1:3000',
-      '[::1]',
-      '[2001:db8::1]:443',
-      '10.0.0.5',
-      '*:22',
-    ])
-    expect(rules).toEqual([
-      { range: '127.0.0.1', port: 3000 },
-      { range: '::1', port: undefined },
-      { range: '2001:db8::1', port: 443 },
-      { range: '10.0.0.5', port: undefined },
-    ])
-    // What the manager builds from allowedDomains: a name may reach exactly
-    // what an allow-listed literal already permits, nothing wider.
+  it('reads the IP literals of the allow/deny lists with the same precedence as for names', () => {
+    // A name may reach exactly what an allow-listed literal already permits,
+    // nothing wider; a deny-listed literal is refused by name too.
     const g = createResolvedAddressGuard({
       localAddresses,
-      allowed: ipLiteralRules(['myapp.test', '127.0.0.1:3000']),
-      denied: ipLiteralRules(['10.0.0.5', '[fd00::7]:22']),
+      allowedDomains: ['*.example.com', 'myapp.test', '127.0.0.1:3000'],
+      deniedDomains: ['10.0.0.5', '[fd00::7]:22', '*:25'],
     })
     expect(g.permits('myapp.test', '127.0.0.1', 3000)).toBe(true)
     expect(g.permits('myapp.test', '127.0.0.1', 5432)).toBe(false)
@@ -511,6 +497,28 @@ describe('resolved-address-guard: config schema', () => {
     expect(g.permits('intranet.example.com', '10.0.0.5', 443)).toBe(false)
     expect(g.permits('intranet.example.com', 'fd00::7', 22)).toBe(false)
     expect(g.permits('intranet.example.com', 'fd00::7', 443)).toBe(true)
+  })
+
+  it('a deny-listed literal wins over an allow-listed one and over the localhost rule', () => {
+    const g = createResolvedAddressGuard({
+      localAddresses,
+      allowedDomains: ['myapp.test', '127.0.0.1', '10.0.0.5', 'localhost'],
+      deniedDomains: ['127.0.0.1:6379', '10.0.0.5:22', '[::1]:6379'],
+    })
+    expect(g.permits('myapp.test', '127.0.0.1', 3000)).toBe(true)
+    expect(g.permits('myapp.test', '127.0.0.1', 6379)).toBe(false)
+    expect(g.permits('git.corp.example', '10.0.0.5', 443)).toBe(true)
+    expect(g.permits('git.corp.example', '10.0.0.5', 22)).toBe(false)
+    expect(g.permits('localhost', '127.0.0.1', 8080)).toBe(true)
+    expect(g.permits('localhost', '127.0.0.1', 6379)).toBe(false)
+    expect(g.permits('app.localhost', '::1', 6379)).toBe(false)
+    // And the other way round: a bare deny-listed literal beats a port-scoped allow.
+    const h = createResolvedAddressGuard({
+      localAddresses,
+      allowedDomains: ['myapp.test', '127.0.0.1:3000'],
+      deniedDomains: ['127.0.0.1'],
+    })
+    expect(h.permits('myapp.test', '127.0.0.1', 3000)).toBe(false)
   })
 })
 
@@ -652,7 +660,7 @@ describe('resolved-address-guard: through the proxy servers', () => {
     const proxyPort = await startHttpProxy(
       createResolvedAddressGuard({
         resolve,
-        allowed: [{ range: '127.0.0.1', port: upstreamPort }],
+        allowedDomains: [`127.0.0.1:${upstreamPort}`],
       }),
     )
     const resp = await rawExchange(
@@ -671,7 +679,7 @@ describe('resolved-address-guard: through the proxy servers', () => {
     const proxyPort = await startHttpProxy(
       createResolvedAddressGuard({
         resolve,
-        allowed: [{ range: '127.0.0.1', port: upstreamPort }],
+        allowedDomains: [`127.0.0.1:${upstreamPort}`],
       }),
     )
     // Chunked from the client, so the proxy re-frames the upstream body.
@@ -693,7 +701,7 @@ describe('resolved-address-guard: through the proxy servers', () => {
     const proxyPort = await startHttpProxy(
       createResolvedAddressGuard({
         resolve: fakeResolver({ 'intranet.example.com': ['10.20.30.40'] }),
-        denied: ['10.0.0.0/8'],
+        deniedResolvedAddresses: ['10.0.0.0/8'],
       }),
     )
     const resp = await rawExchange(
@@ -835,7 +843,7 @@ describe('resolved-address-guard: through the proxy servers', () => {
 
   it('SOCKS: a permitted resolution is dialed at the resolved address', async () => {
     const socksPort = await startSocks(
-      createResolvedAddressGuard({ resolve, allowed: ['127.0.0.0/8'] }),
+      createResolvedAddressGuard({ resolve, allowedDomains: ['127.0.0.1'] }),
     )
     const { rep, sock } = await socksConnect(socksPort, {
       type: 'domain',
@@ -1016,7 +1024,7 @@ describe('resolved-address-guard: TLS-terminated upstream leg', () => {
     const proxyPort = await startTerminatingProxy(
       createResolvedAddressGuard({
         resolve,
-        allowed: [{ range: '127.0.0.1', port: upstreamPort }],
+        allowedDomains: [`127.0.0.1:${upstreamPort}`],
       }),
     )
     const r = await curl(proxyPort, `https://${UP_HOST}:${upstreamPort}/app`)
@@ -1032,7 +1040,7 @@ describe('resolved-address-guard: TLS-terminated upstream leg', () => {
     const proxyPort = await startTerminatingProxy(
       createResolvedAddressGuard({
         resolve: fakeResolver({ [UP_HOST]: ['127.0.0.1'] }),
-        allowed: [{ range: '127.0.0.1', port: upstreamPort }],
+        allowedDomains: [`127.0.0.1:${upstreamPort}`],
       }),
     )
     const body = 'command=ls-refs'
