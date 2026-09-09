@@ -160,6 +160,22 @@ describe('parent-proxy: NO_PROXY matching', () => {
     expect(shouldBypassParentProxy(r, 'fe80::1')).toBe(true)
   })
 
+  test('a zoned IPv6 entry is its unzoned range and never throws', () => {
+    const r = mk('fe80::1%eth0,fe80::%eth1/10,10.0.0.0/8')
+    expect(shouldBypassParentProxy(r, 'fe80::1')).toBe(true)
+    expect(shouldBypassParentProxy(r, 'fe80::2')).toBe(true)
+    expect(shouldBypassParentProxy(r, '10.1.1.1')).toBe(true)
+    expect(shouldBypassParentProxy(r, '8.8.8.8')).toBe(false)
+  })
+
+  test('an IPv4-mapped entry matches exactly its IPv4 address, not every IPv4 host', () => {
+    const r = mk('::ffff:10.0.0.1,::ffff:192.168.0.0/112')
+    expect(shouldBypassParentProxy(r, '10.0.0.1')).toBe(true)
+    expect(shouldBypassParentProxy(r, '192.168.4.4')).toBe(true)
+    expect(shouldBypassParentProxy(r, '10.0.0.2')).toBe(false)
+    expect(shouldBypassParentProxy(r, '8.8.8.8')).toBe(false)
+  })
+
   test('empty CIDR suffix does not become match-all', () => {
     const r = mk('10.0.0.0/')
     // Malformed — should be ignored, not treated as /0

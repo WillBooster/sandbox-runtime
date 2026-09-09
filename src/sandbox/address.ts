@@ -24,12 +24,16 @@ export type AddressRange = {
 }
 
 /**
- * Parse an IP literal or CIDR range (`10.0.0.0/8`, `fc00::/7`, `::1`).
- * Returns undefined for anything else; IPv6 is unbracketed.
+ * Parse an IP literal or CIDR range (`10.0.0.0/8`, `fc00::/7`, `::1`) into
+ * the one form rules are stored in: an IPv4-mapped IPv6 entry becomes the
+ * IPv4 rule it stands for (`::ffff:10.0.0.0/104` → `10.0.0.0/8`) and a zone
+ * id is dropped, since matching treats both spellings alike and some
+ * runtimes mis-evaluate or refuse the IPv6 ones. Undefined for anything
+ * else; IPv6 is unbracketed.
  */
 export function parseAddressRange(entry: string): AddressRange | undefined {
   const slash = entry.indexOf('/')
-  const address = slash === -1 ? entry : entry.slice(0, slash)
+  const address = stripZone(slash === -1 ? entry : entry.slice(0, slash))
   const family = ipFamily(address)
   if (!family) return undefined
   const max = family === 'ipv6' ? 128 : 32
@@ -39,14 +43,24 @@ export function parseAddressRange(entry: string): AddressRange | undefined {
     if (!/^\d{1,3}$/.test(raw) || Number(raw) > max) return undefined
     prefix = Number(raw)
   }
+  const mapped = family === 'ipv6' ? mappedIPv4(address) : undefined
+  if (mapped !== undefined) {
+    return prefix < 96
+      ? undefined
+      : { address: mapped, prefix: prefix - 96, family: 'ipv4' }
+  }
   return { address, prefix, family }
 }
 
-/** Add an IP literal or CIDR range to `list`; false (list untouched) if malformed. */
+/** Add an IP literal or CIDR range to `list`; false (list untouched) if malformed or refused by the runtime. */
 export function addRange(list: BlockList, entry: string): boolean {
   const range = parseAddressRange(entry)
   if (!range) return false
-  list.addSubnet(range.address, range.prefix, range.family)
+  try {
+    list.addSubnet(range.address, range.prefix, range.family)
+  } catch {
+    return false
+  }
   return true
 }
 
@@ -73,10 +87,44 @@ export function buildAddressSet(entries: readonly string[]): BlockList {
  * is a non-match on some runtimes.
  */
 export function addressInSet(list: BlockList, address: string): boolean {
-  const pct = address.indexOf('%')
-  const addr = pct === -1 ? address : address.slice(0, pct)
+  const addr = stripZone(address)
   const family = ipFamily(addr)
   return family !== undefined && list.check(addr, family)
+}
+
+/** Drop an IPv6 zone id (`fe80::1%en0` → `fe80::1`). */
+function stripZone(address: string): string {
+  const pct = address.indexOf('%')
+  return pct === -1 ? address : address.slice(0, pct)
+}
+
+/** The eight 16-bit groups of an IPv6 literal (zone dropped), or undefined. */
+function ipv6Groups(address: string): number[] | undefined {
+  let host: string
+  try {
+    host = new URL(`http://[${stripZone(address)}]/`).hostname.slice(1, -1)
+  } catch {
+    return undefined
+  }
+  const [head = '', tail] = host.split('::')
+  const lead = head ? head.split(':') : []
+  const rest = tail ? tail.split(':') : []
+  const fill = tail === undefined ? 0 : 8 - lead.length - rest.length
+  if (fill < 0 || lead.length + fill + rest.length !== 8) return undefined
+  return [...lead, ...Array<string>(fill).fill('0'), ...rest].map(g =>
+    parseInt(g, 16),
+  )
+}
+
+const dottedQuad = (hi: number, lo: number): string =>
+  `${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`
+
+/** The IPv4 address of an IPv4-mapped IPv6 literal (`::ffff:a.b.c.d`), or undefined. */
+export function mappedIPv4(address: string): string | undefined {
+  const g = ipv6Groups(address)
+  return g && g.slice(0, 5).every(x => x === 0) && g[5] === 0xffff
+    ? dottedQuad(g[6]!, g[7]!)
+    : undefined
 }
 
 const LOOPBACK = buildAddressSet(LOOPBACK_RANGES)

@@ -120,7 +120,31 @@ describe('address: parseAddressRange', () => {
     expect(parseAddressRange('::1')?.prefix).toBe(128)
   })
 
-  it('rejects hostnames, bad prefixes and bracketed IPv6', () => {
+  it('stores an IPv4-mapped IPv6 entry as the IPv4 rule and drops a zone id', () => {
+    expect(parseAddressRange('::ffff:10.0.0.1')).toEqual({
+      address: '10.0.0.1',
+      prefix: 32,
+      family: 'ipv4',
+    })
+    expect(parseAddressRange('::FFFF:A00:0/104')).toEqual({
+      address: '10.0.0.0',
+      prefix: 8,
+      family: 'ipv4',
+    })
+    expect(parseAddressRange('::ffff:0:0/96')).toEqual({
+      address: '0.0.0.0',
+      prefix: 0,
+      family: 'ipv4',
+    })
+    expect(parseAddressRange('fe80::1%en0')).toEqual({
+      address: 'fe80::1',
+      prefix: 128,
+      family: 'ipv6',
+    })
+    expect(parseAddressRange('fe80::%eth0/10')?.address).toBe('fe80::')
+  })
+
+  it('rejects hostnames, bad prefixes, bracketed IPv6 and a mapped range wider than /96', () => {
     for (const bad of [
       'example.com',
       '10.0.0.0/33',
@@ -128,6 +152,7 @@ describe('address: parseAddressRange', () => {
       '10.0.0.0/x',
       'fc00::/129',
       '[::1]',
+      '::ffff:10.0.0.0/95',
       '',
       '300.1.1.1',
     ]) {
@@ -254,6 +279,22 @@ describe('resolved-address-guard: permits', () => {
     expect(g.permits('myapp.test', '127.0.0.2', 443)).toBe(false)
     expect(g.permits('myapp.test', '::1', 3000)).toBe(true)
     expect(g.permits('myapp.test', '::1', 443)).toBe(false)
+  })
+
+  it('an IPv4-mapped literal in either list binds exactly its IPv4 address', () => {
+    const g = createResolvedAddressGuard({
+      localAddresses,
+      allowed: ipLiteralRules(['[::ffff:127.0.0.1]:3000']),
+      denied: ['::ffff:10.0.0.1', ...ipLiteralRules(['[::ffff:10.0.0.2]'])],
+    })
+    expect(g.permits('myapp.test', '127.0.0.1', 3000)).toBe(true)
+    expect(g.permits('myapp.test', '127.0.0.1', 3001)).toBe(false)
+    expect(g.permits('myapp.test', '169.254.169.254', 3000)).toBe(false)
+    expect(g.permits('myapp.test', '127.0.0.2', 3000)).toBe(false)
+    expect(g.permits('api.example.com', '10.0.0.1', 443)).toBe(false)
+    expect(g.permits('api.example.com', '::ffff:10.0.0.2', 443)).toBe(false)
+    expect(g.permits('api.example.com', '10.0.0.3', 443)).toBe(true)
+    expect(g.permits('api.example.com', '192.0.2.1', 443)).toBe(true)
   })
 
   it('port-qualified denied rules apply to that port only', () => {
