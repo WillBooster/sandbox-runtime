@@ -34,7 +34,7 @@ import {
   type GetBodySubstitutions,
 } from './body-substitution.js'
 import { mintLeafCert, secureContextFor } from './mitm-leaf.js'
-import { stripHopByHop } from './parent-proxy.js'
+import { directRequestHost, stripHopByHop } from './parent-proxy.js'
 import { sha256Hex } from './aws-sigv4.js'
 import type { PlanSigv4 } from './credential-aws-pairs.js'
 
@@ -394,12 +394,15 @@ async function forwardUpstream(
     }
   }
 
-  // Bun's https.request verifies the upstream cert against headers.host
-  // verbatim (including ":port"), which never matches a SAN. Drop the host
-  // header and let the runtime derive it from {host, port} — same wire value,
-  // correct verification under both Node and Bun.
+  // The upstream is dialed by vetted address (below), so Host and SNI are
+  // what carry the name: rebuild Host from the tunnel's target — the name the
+  // allowlist saw — rather than forwarding the client's spelling.
   const fwdHeaders = stripHopByHop(req.headers)
-  delete fwdHeaders.host
+  const bracketedHost =
+    isIP(target.hostname) === 6 ? `[${target.hostname}]` : target.hostname
+  const hostHeader =
+    target.port === 443 ? bracketedHost : `${bracketedHost}:${target.port}`
+  fwdHeaders.host = hostHeader
   // SigV4 planning runs on the PRE-substitution headers (the trigger is
   // the fake access key id in the credential scope, which the header
   // substitution below replaces) but on the POST-strip view: the plan's
@@ -482,11 +485,6 @@ async function forwardUpstream(
       // bodyless-default methods it would raw-append the buffer unframed.
       fwdHeaders['content-length'] = String(bufferedBody.length)
     }
-    // Mirror the Host value the runtime derives from {host, port} below.
-    const bracketedHost =
-      isIP(target.hostname) === 6 ? `[${target.hostname}]` : target.hostname
-    const hostHeader =
-      target.port === 443 ? bracketedHost : `${bracketedHost}:${target.port}`
     try {
       sigv4Plan.apply(fwdHeaders, hostHeader, payloadHash)
     } catch (err) {
@@ -522,23 +520,45 @@ async function forwardUpstream(
     fwdHeaders['transfer-encoding'] = 'chunked'
   }
 
+  // Vet and pick the upstream address first (see directRequestHost); the
+  // name stays in Host and SNI below.
+  let upstreamHost: string
+  try {
+    upstreamHost = await directRequestHost(
+      target.hostname,
+      target.port,
+      target.lookup,
+    )
+  } catch (err) {
+    logForDebugging(
+      `[tls-terminate] upstream ${target.hostname}:${target.port} failed: ${(err as Error).message}`,
+      { level: 'error' },
+    )
+    respondUpstreamError(res, err as Error)
+    return
+  }
+  if (res.destroyed) {
+    // Client went away during the dial.
+    body.destroy()
+    return
+  }
+
   // TODO(terminating-tls): honour parentProxy for the upstream leg.
   const upstream = httpsRequest(
     {
-      host: target.hostname,
+      host: upstreamHost,
       port: target.port,
       path,
       method: req.method,
       headers: fwdHeaders,
       // We're a TLS-terminating proxy, not a trust boundary for the upstream
       // server's identity — let the runtime do normal verification against
-      // system roots (and NODE_EXTRA_CA_CERTS). servername must match the
-      // host the client intended; SNI cannot carry an IP literal, and Bun's
-      // https.request treats `servername: undefined` differently from
-      // omitting the key, so spread conditionally.
+      // system roots (and NODE_EXTRA_CA_CERTS). `host` is an address, so
+      // servername is what SNI and certificate verification use; SNI cannot
+      // carry an IP literal, and Bun's https.request treats `servername:
+      // undefined` differently from omitting the key, so spread conditionally.
       ...(isIP(target.hostname) ? {} : { servername: target.hostname }),
       ...(target.upstreamCA ? { ca: target.upstreamCA } : {}),
-      lookup: target.lookup,
       // No global agent: a proxy's outbound leg shouldn't share a connection
       // pool keyed on the proxy process. Also works around a Bun quirk where
       // the first request's `ca:` value is cached on the global agent and

@@ -31,6 +31,7 @@ import { isResolvedAddressDenied } from './resolved-address-guard.js'
 import {
   canonicalizeHost,
   connectViaParentProxy,
+  directRequestHost,
   dialDirect,
   openConnectTunnel,
   proxyAuthHeader,
@@ -874,17 +875,39 @@ export function createHttpProxyServer(options: HttpProxyServerOptions): Server {
           },
         )
       } else {
-        const requestFn = url.protocol === 'https:' ? httpsRequest : httpRequest
-        proxyReq = requestFn(
-          {
+        // Vet and pick the upstream address before any request object exists
+        // (see directRequestHost); the name stays in Host and, for TLS, SNI.
+        let upstreamHost: string
+        try {
+          upstreamHost = await directRequestHost(
             hostname,
+            port,
+            options.lookupFor?.(port, auth.encodedCommand),
+          )
+        } catch (err) {
+          logForDebugging(`Proxy request failed: ${(err as Error).message}`, {
+            level: 'error',
+          })
+          respondUpstreamError(res, err as Error)
+          return
+        }
+        if (res.destroyed || req.socket.destroyed) {
+          // Client went away during the dial.
+          body.destroy()
+          return
+        }
+        const isHttps = url.protocol === 'https:'
+        proxyReq = (isHttps ? httpsRequest : httpRequest)(
+          {
+            hostname: upstreamHost,
             port,
             path: url.pathname + url.search,
             method: req.method,
             headers: fwdHeaders,
-            lookup: options.lookupFor?.(port, auth.encodedCommand),
-            // No shared pool: a kept-alive socket is reused without consulting
-            // `lookup`, and the global agent is shared with the embedding process.
+            ...(isHttps && !isIP(hostname) ? { servername: hostname } : {}),
+            // No shared pool: a kept-alive socket would be reused for whatever
+            // name mapped to this address, and the global agent is shared with
+            // the embedding process.
             agent: false,
           },
           proxyRes => {

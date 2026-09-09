@@ -447,6 +447,30 @@ export function canonicalizeHost(h: string): string | undefined {
 }
 
 /**
+ * Upstream address for an `http(s).request` to `host:port` over the direct
+ * route. The name is dialed exactly as a tunnel would be ({@link dialDirect}:
+ * the guard's `lookup`, the connect timeout, the runtime's address-family
+ * fallback), the address that answered is kept and the probe released; the
+ * request then goes to that literal with the name carried in Host / SNI. So
+ * the vetted address is the one requested, and `lookup` never reaches the
+ * HTTP client — Bun's node:http client resolves through it but then drops or
+ * repeats a streamed request body, and cannot adopt an already-open socket.
+ * Without a `lookup` (or for an IP literal) the host is returned unchanged.
+ */
+export async function directRequestHost(
+  host: string,
+  port: number,
+  lookup?: LookupFunction,
+): Promise<string> {
+  if (!lookup || isIP(host)) return host
+  const probe = await dialDirect(host, port, lookup)
+  const address = probe.remoteAddress
+  probe.destroy()
+  if (!address) throw new Error(`connect ${host}:${port}: no peer address`)
+  return address
+}
+
+/**
  * Dial `host:port` directly with a bounded timeout. Shared by the HTTP and
  * SOCKS direct-connect paths so they get the same timeout behaviour as the
  * CONNECT-tunnelled paths. `lookup` is the resolved-address guard's (see

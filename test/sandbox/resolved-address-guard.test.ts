@@ -40,7 +40,7 @@ const CA_PEM = readFileSync(CA_CERT, 'utf8')
  * literals and the reserved `localhost` names are left alone.
  */
 
-/** Resolver stub: answers from a fixed table, ENOTFOUND otherwise. */
+/** Resolver stub: answers from a fixed table (ENOTFOUND otherwise) on a later tick, as dns.lookup does. */
 function fakeResolver(table: Record<string, string[]>): Resolver & {
   calls: string[]
 } {
@@ -48,23 +48,25 @@ function fakeResolver(table: Record<string, string[]>): Resolver & {
   const resolve: Resolver = (hostname, _opts, cb) => {
     calls.push(hostname)
     const addrs = table[hostname]
-    if (!addrs) {
-      const err: NodeJS.ErrnoException = new Error(
-        `getaddrinfo ENOTFOUND ${hostname}`,
+    setImmediate(() => {
+      if (!addrs) {
+        const err: NodeJS.ErrnoException = new Error(
+          `getaddrinfo ENOTFOUND ${hostname}`,
+        )
+        err.code = 'ENOTFOUND'
+        cb(err, [])
+        return
+      }
+      cb(
+        null,
+        addrs.map(
+          (address): LookupAddress => ({
+            address,
+            family: address.includes(':') ? 6 : 4,
+          }),
+        ),
       )
-      err.code = 'ENOTFOUND'
-      cb(err, [])
-      return
-    }
-    cb(
-      null,
-      addrs.map(
-        (address): LookupAddress => ({
-          address,
-          family: address.includes(':') ? 6 : 4,
-        }),
-      ),
-    )
+    })
   }
   return Object.assign(resolve, { calls })
 }
@@ -421,9 +423,16 @@ describe('resolved-address-guard: through the proxy servers', () => {
     upstreamHits = []
     denials = []
     upstream = createHttpServer((req, res) => {
-      upstreamHits.push(`${req.method} ${req.url} host=${req.headers.host}`)
-      res.writeHead(200, { 'Content-Type': 'text/plain' })
-      res.end('upstream-ok')
+      let body = ''
+      req.setEncoding('utf8').on('data', c => (body += c))
+      req.on('end', () => {
+        upstreamHits.push(
+          `${req.method} ${req.url} host=${req.headers.host}` +
+            (body ? ` body=${body}` : ''),
+        )
+        res.writeHead(200, { 'Content-Type': 'text/plain' })
+        res.end('upstream-ok')
+      })
     })
     upstream.listen(0, '127.0.0.1')
     await once(upstream, 'listening')
@@ -462,6 +471,7 @@ describe('resolved-address-guard: through the proxy servers', () => {
     return (proxy.address() as { port: number }).port
   }
 
+  /** One request over a raw socket; resolves once the response is complete (Content-Length) or the socket closes. */
   async function rawExchange(
     proxyPort: number,
     payload: string,
@@ -470,11 +480,18 @@ describe('resolved-address-guard: through the proxy servers', () => {
     await once(sock, 'connect')
     sock.write(payload)
     let buf = ''
-    sock.on('data', d => (buf += d.toString('latin1')))
-    await Promise.race([
-      once(sock, 'close'),
-      once(sock, 'end').then(() => sock.destroy()),
-    ])
+    await new Promise<void>(resolve => {
+      sock.on('data', d => {
+        buf += d.toString('latin1')
+        const headEnd = buf.indexOf('\r\n\r\n')
+        if (headEnd === -1) return
+        const length = /content-length: (\d+)/i.exec(buf.slice(0, headEnd))
+        if (length && buf.length - headEnd - 4 >= Number(length[1])) resolve()
+      })
+      sock.on('end', resolve)
+      sock.on('close', resolve)
+    })
+    sock.destroy()
     return buf
   }
 
@@ -540,6 +557,28 @@ describe('resolved-address-guard: through the proxy servers', () => {
       `GET /app host=devbox.example.com:${upstreamPort}`,
     ])
     expect(resolve.calls).toContain('devbox.example.com')
+  })
+
+  it('plain HTTP: a permitted resolution forwards a streamed request body intact, exactly once', async () => {
+    const proxyPort = await startHttpProxy(
+      createResolvedAddressGuard({
+        resolve,
+        allowed: [{ range: '127.0.0.1', port: upstreamPort }],
+      }),
+    )
+    // Chunked from the client, so the proxy re-frames the upstream body.
+    const body = '{"password":"hunter2"}'
+    const resp = await rawExchange(
+      proxyPort,
+      `POST http://devbox.example.com:${upstreamPort}/submit HTTP/1.1\r\n` +
+        `Host: devbox.example.com:${upstreamPort}\r\n` +
+        `Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n` +
+        `${body.length.toString(16)}\r\n${body}\r\n0\r\n\r\n`,
+    )
+    expect(resp.startsWith('HTTP/1.1 200')).toBe(true)
+    expect(upstreamHits).toEqual([
+      `POST /submit host=devbox.example.com:${upstreamPort} body=${body}`,
+    ])
   })
 
   it('plain HTTP: an embedder-configured range is refused too', async () => {
@@ -722,10 +761,12 @@ describe('resolved-address-guard: TLS-terminated upstream leg', () => {
   const UP_HOST = 'devbox.example.com'
   let upstream: ReturnType<typeof createHttpsServer>
   let upstreamPort: number
+  let upstreamHits: string[]
   let denials: Denial[]
   const closers: Array<() => Promise<unknown>> = []
 
   beforeEach(async () => {
+    upstreamHits = []
     denials = []
     // Leaf for the HOSTNAME, served on 127.0.0.1: a request that reaches it
     // verified proves the upstream leg dialed the resolved address while
@@ -737,8 +778,15 @@ describe('resolved-address-guard: TLS-terminated upstream leg', () => {
     upstream = createHttpsServer(
       { cert: leafOnly, key: leaf.keyPem },
       (req, res) => {
-        res.writeHead(200, { 'x-upstream-host': String(req.headers.host) })
-        res.end('tls-upstream-ok')
+        let body = ''
+        req.setEncoding('utf8').on('data', c => (body += c))
+        req.on('end', () => {
+          upstreamHits.push(
+            `${req.method} ${req.url}` + (body ? ` body=${body}` : ''),
+          )
+          res.writeHead(200, { 'x-upstream-host': String(req.headers.host) })
+          res.end('tls-upstream-ok')
+        })
       },
     )
     await new Promise<void>(r => upstream.listen(0, '127.0.0.1', () => r()))
@@ -773,6 +821,7 @@ describe('resolved-address-guard: TLS-terminated upstream leg', () => {
   async function curl(
     proxyPort: number,
     url: string,
+    data?: string,
   ): Promise<{ exit: number; out: string }> {
     const child = spawn('curl', [
       '-sS',
@@ -784,6 +833,7 @@ describe('resolved-address-guard: TLS-terminated upstream leg', () => {
       '10',
       '-D',
       '-',
+      ...(data === undefined ? [] : ['--data-binary', data]),
       url,
     ])
     let out = ''
@@ -868,5 +918,23 @@ describe('resolved-address-guard: TLS-terminated upstream leg', () => {
     expect(r.out).toContain(`x-upstream-host: ${UP_HOST}:${upstreamPort}`)
     expect(resolve.calls).toContain(UP_HOST)
     expect(denials).toEqual([])
+  })
+
+  it('permitted resolution: a request body reaches the upstream intact, exactly once', async () => {
+    const proxyPort = await startTerminatingProxy(
+      createResolvedAddressGuard({
+        resolve: fakeResolver({ [UP_HOST]: ['127.0.0.1'] }),
+        allowed: [{ range: '127.0.0.1', port: upstreamPort }],
+      }),
+    )
+    const body = 'command=ls-refs'
+    const r = await curl(
+      proxyPort,
+      `https://${UP_HOST}:${upstreamPort}/upload`,
+      body,
+    )
+    expect(r.exit).toBe(0)
+    expect(r.out).toContain('HTTP/1.1 200')
+    expect(upstreamHits).toEqual([`POST /upload body=${body}`])
   })
 })
