@@ -17,7 +17,7 @@ import {
   type ResolvedAddressGuard,
   type Resolver,
 } from '../../src/sandbox/resolved-address-guard.js'
-import { parseAddressRange } from '../../src/sandbox/address.js'
+import { embeddedIPv4, parseAddressRange } from '../../src/sandbox/address.js'
 import {
   createHttpProxyServer,
   type DirectLookup,
@@ -165,6 +165,32 @@ describe('address: parseAddressRange', () => {
 const HOST_ADDRESSES = ['192.168.7.23', '2001:db8:7::23', '127.0.0.1', '::1']
 const localAddresses = (): string[] => HOST_ADDRESSES
 
+describe('address: embeddedIPv4', () => {
+  it('extracts the IPv4 address from the transition forms that carry one', () => {
+    const cases: Array<[string, string | undefined]> = [
+      ['::ffff:127.0.0.1', '127.0.0.1'], // IPv4-mapped
+      ['::FFFF:7F00:1', '127.0.0.1'],
+      ['::7f00:1', '127.0.0.1'], // IPv4-compatible
+      ['::169.254.169.254', '169.254.169.254'],
+      ['::ffff:0:a9fe:a9fe', '169.254.169.254'], // IPv4-translated
+      ['64:ff9b::7f00:1', '127.0.0.1'], // NAT64 well-known prefix
+      ['64:ff9b::8.8.8.8', '8.8.8.8'],
+      ['64:ff9b:1:abcd:e::a00:5', '10.0.0.5'], // NAT64 local-use prefix
+      ['2002:c0a8:717::1', '192.168.7.23'], // 6to4
+      ['2002:7f00:1:5::9%en0', '127.0.0.1'],
+      ['::1', '0.0.0.1'],
+      ['64:ff9b:0:1::7f00:1', undefined], // not one of the forms
+      ['2001:db8::7f00:1', undefined],
+      ['fe80::7f00:1', undefined],
+      ['127.0.0.1', undefined],
+      ['not-an-address', undefined],
+    ]
+    for (const [address, v4] of cases) {
+      expect([address, embeddedIPv4(address)]).toEqual([address, v4])
+    }
+  })
+})
+
 describe('resolved-address-guard: permits', () => {
   const guard = createResolvedAddressGuard({ localAddresses })
 
@@ -217,6 +243,47 @@ describe('resolved-address-guard: permits', () => {
       allowed: ['192.168.7.23'],
     })
     expect(carved.permits('nas.example.com', '192.168.7.23', 443)).toBe(true)
+  })
+
+  it('judges an IPv6 answer that embeds an IPv4 address as that address too', () => {
+    for (const addr of [
+      '64:ff9b::7f00:1', // NAT64 to loopback
+      '64:ff9b::a9fe:a9fe', // NAT64 to the link-local metadata endpoint
+      '64:ff9b:1::a9fe:a9fe',
+      '64:ff9b::c0a8:717', // NAT64 to this host's own 192.168.7.23
+      '2002:7f00:1::1', // 6to4
+      '2002:c0a8:717:1::2',
+      '::7f00:1', // IPv4-compatible
+      '::ffff:0:7f00:1', // IPv4-translated
+    ]) {
+      expect([addr, guard.permits('api.example.com', addr, 443)]).toEqual([
+        addr,
+        false,
+      ])
+    }
+    // The same forms carrying a public address are left alone, as is an
+    // ordinary IPv6 address whose low bits merely look like one.
+    for (const addr of [
+      '64:ff9b::c000:20a',
+      '2002:c000:20a::1',
+      '2001:db8::7f00:1',
+      '64:ff9b:0:1::7f00:1',
+    ]) {
+      expect([addr, guard.permits('api.example.com', addr, 443)]).toEqual([
+        addr,
+        true,
+      ])
+    }
+    // Embedder rules and literal carve-outs bind the embedded address too.
+    const g = createResolvedAddressGuard({
+      localAddresses,
+      denied: ['10.0.0.0/8'],
+      allowed: ['10.0.0.9'],
+    })
+    expect(g.permits('intranet.example.com', '64:ff9b::a00:5', 443)).toBe(false)
+    expect(g.permits('intranet.example.com', '64:ff9b::a00:9', 443)).toBe(true)
+    expect(g.permits('intranet.example.com', '64:ff9b::ac10:1', 443)).toBe(true)
+    expect(g.permits('localhost', '64:ff9b::7f00:1', 443)).toBe(false)
   })
 
   it('permits public and (by default) private-use addresses for a hostname', () => {

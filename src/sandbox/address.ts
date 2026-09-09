@@ -127,6 +127,27 @@ export function mappedIPv4(address: string): string | undefined {
     : undefined
 }
 
+/**
+ * The IPv4 address an IPv6 address carries in one of the forms a network
+ * delivers to that IPv4 destination: IPv4-mapped and IPv4-compatible
+ * (`::ffff:0:0/96`, `::/96`), IPv4-translated (`::ffff:0:0:0/96`), the
+ * NAT64 well-known prefixes (`64:ff9b::/96`, `64:ff9b:1::/48`) and 6to4
+ * (`2002::/16`). Undefined for any other address.
+ */
+export function embeddedIPv4(address: string): string | undefined {
+  const g = ipv6Groups(address)
+  if (!g) return undefined
+  const zero = (from: number, to: number) =>
+    g.slice(from, to).every(x => x === 0)
+  if (g[0] === 0x2002) return dottedQuad(g[1]!, g[2]!)
+  const low = dottedQuad(g[6]!, g[7]!)
+  if (g[0] === 0x64 && g[1] === 0xff9b && (g[2] === 1 || (!g[2] && zero(3, 6))))
+    return low
+  if (zero(0, 5) && (g[5] === 0 || g[5] === 0xffff)) return low
+  if (zero(0, 4) && g[4] === 0xffff && g[5] === 0) return low
+  return undefined
+}
+
 const LOOPBACK = buildAddressSet(LOOPBACK_RANGES)
 
 /** True for an IPv4/IPv6 loopback literal (including v4-mapped forms). */

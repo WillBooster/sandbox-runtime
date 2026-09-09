@@ -31,6 +31,7 @@ import { logForDebugging } from '../utils/debug.js'
 import {
   addRange,
   addressInSet,
+  embeddedIPv4,
   isLoopbackAddress,
   isLoopbackName,
   LOOPBACK_RANGES,
@@ -42,7 +43,8 @@ import {
  * {@link localInterfaceAddresses}), since a service bound to 0.0.0.0 answers
  * on those exactly as on loopback. Private-use ranges (RFC 1918, ULA, CGNAT)
  * are deliberately absent: allow-listing an intranet hostname is legitimate,
- * so those are opt-in via `network.deniedResolvedAddresses`.
+ * so those are opt-in via `network.deniedResolvedAddresses`. IPv4 rules also
+ * bind the IPv6 forms that carry an IPv4 address (see `embeddedIPv4`).
  */
 export const DEFAULT_DENIED_RESOLVED_ADDRESSES: readonly string[] = [
   ...LOOPBACK_RANGES,
@@ -190,9 +192,15 @@ export function createResolvedAddressGuard(
   ): boolean => {
     if (isIP(hostname)) return true
     if (!isIP(address)) return false
-    if (inRuleSet(allowed, address, port)) return true
+    // A NAT64 / 6to4 / IPv4-compatible answer is delivered to the IPv4
+    // address it carries, so it is judged under both spellings.
+    const v4 = embeddedIPv4(address)
+    const forms = v4 === undefined ? [address] : [address, v4]
+    if (forms.some(a => inRuleSet(allowed, a, port))) return true
     if (isLoopbackName(hostname)) return isLoopbackAddress(address)
-    return !inRuleSet(denied, address, port) && !addressInSet(local, address)
+    return !forms.some(
+      a => inRuleSet(denied, a, port) || addressInSet(local, a),
+    )
   }
 
   const lookupFor =
