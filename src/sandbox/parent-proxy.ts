@@ -512,12 +512,14 @@ export async function directRequestOptions(
  * Dial `host:port` directly with a bounded timeout. Shared by the HTTP and
  * SOCKS direct-connect paths so they get the same timeout behaviour as the
  * CONNECT-tunnelled paths. `lookup` is the resolved-address guard's (see
- * resolved-address-guard.ts); the runtime dials what it returns.
+ * resolved-address-guard.ts); the runtime dials what it returns. It is a
+ * required argument so no direct dial omits it by accident — pass
+ * `undefined` explicitly to use the runtime's resolver unguarded.
  */
 export function dialDirect(
   host: string,
   port: number,
-  lookup?: LookupFunction,
+  lookup: LookupFunction | undefined,
   timeoutMs = CONNECT_TIMEOUT_MS,
 ): Promise<Socket> {
   return new Promise((resolve, reject) => {
