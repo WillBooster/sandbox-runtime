@@ -218,18 +218,27 @@ export function createResolvedAddressGuard(
     if (isIP(hostname)) return undefined
     if (!isIP(address)) return 'an unparsable address'
     // A NAT64 / 6to4 / IPv4-compatible answer is delivered to the IPv4
-    // address it carries, so it is judged under both spellings.
+    // address it carries, so every deny is applied to that address too. The
+    // carried form only ADDS denials: it never earns an allow-list carve-out
+    // (that would let `::1`, whose IPv4-compatible form is `0.0.0.1`, ride a
+    // carve-out for `0.0.0.1`) and does not stand in for the address in the
+    // localhost rule. An IPv4-mapped answer needs no decode here — BlockList
+    // matches it against the IPv4 rules in either spelling.
     const v4 = embeddedIPv4(address)
-    const forms = v4 === undefined ? [address] : [address, v4]
-    const hits = (set: RuleSet) => forms.some(a => inRuleSet(set, a, port))
-    if (hits(refused)) return 'a deny-listed address'
-    if (hits(allowed)) return undefined
+    const denies = (set: RuleSet) =>
+      inRuleSet(set, address, port) ||
+      (v4 !== undefined && inRuleSet(set, v4, port))
+    if (denies(refused)) return 'a deny-listed address'
+    if (inRuleSet(allowed, address, port)) return undefined
     if (isLoopbackName(hostname)) {
       return isLoopbackAddress(address) ? undefined : 'a non-loopback address'
     }
-    const why = denied.find(([, set]) => hits(set))?.[0]
+    const why = denied.find(([, set]) => denies(set))?.[0]
     if (why) return why
-    if (forms.some(a => addressInSet(local, a)))
+    if (
+      addressInSet(local, address) ||
+      (v4 !== undefined && addressInSet(local, v4))
+    )
       return "one of this host's addresses"
     return undefined
   }

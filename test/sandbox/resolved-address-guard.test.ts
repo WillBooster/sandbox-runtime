@@ -281,16 +281,28 @@ describe('resolved-address-guard: permits', () => {
         true,
       ])
     }
-    // Embedder rules and literal carve-outs bind the embedded address too.
+    // The carried IPv4 binds embedder deny rules — and only denials: it does
+    // not inherit an allow-list carve-out, so a name cannot reach a denied
+    // address by resolving to a carried form of an allow-listed one.
     const g = createResolvedAddressGuard({
       localAddresses,
       deniedResolvedAddresses: ['10.0.0.0/8'],
       allowedDomains: ['10.0.0.9'],
     })
     expect(g.permits('intranet.example.com', '64:ff9b::a00:5', 443)).toBe(false)
-    expect(g.permits('intranet.example.com', '64:ff9b::a00:9', 443)).toBe(true)
+    expect(g.permits('intranet.example.com', '64:ff9b::a00:9', 443)).toBe(false)
+    expect(g.permits('intranet.example.com', '10.0.0.9', 443)).toBe(true)
     expect(g.permits('intranet.example.com', '64:ff9b::ac10:1', 443)).toBe(true)
     expect(g.permits('localhost', '64:ff9b::7f00:1', 443)).toBe(false)
+    // `::1` is loopback; its IPv4-compatible form `0.0.0.1` must not let it
+    // ride a carve-out for `0.0.0.1`, and a real mapped carve-out still holds.
+    const h = createResolvedAddressGuard({
+      localAddresses,
+      allowedDomains: ['0.0.0.1:3000', '127.0.0.1:3000'],
+    })
+    expect(h.permits('svc.example.com', '::1', 3000)).toBe(false)
+    expect(h.permits('svc.example.com', '0.0.0.1', 3000)).toBe(true)
+    expect(h.permits('svc.example.com', '::ffff:127.0.0.1', 3000)).toBe(true)
   })
 
   it('permits public and (by default) private-use addresses for a hostname', () => {
