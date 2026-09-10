@@ -1,6 +1,6 @@
-import path from 'node:path';
+import path from 'node:path'
 
-const directory = import.meta.dir;
+const directory = import.meta.dir
 for (const [name, target] of [
   ['arm64', 'aarch64-linux-musl'],
   ['x64', 'x86_64-linux-musl'],
@@ -23,7 +23,8 @@ for (const [name, target] of [
       '-o',
       path.join(directory, `${name}.bin`),
     ],
-    { stdout: 'inherit', stderr: 'inherit' }
-  );
-  if ((await process.exited) !== 0) throw new Error(`Failed to build SSH-agent supervisor for ${name}`);
+    { stdout: 'inherit', stderr: 'inherit' },
+  )
+  if ((await process.exited) !== 0)
+    throw new Error(`Failed to build SSH-agent supervisor for ${name}`)
 }

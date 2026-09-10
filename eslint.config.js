@@ -21,6 +21,7 @@ export default [
         projectService: {
           allowDefaultProject: [
             'eslint.config.js',
+            'packages/ssh-agent/build.ts',
             'test/utils/which-node-test.mjs',
             'vendor/build-common.ts',
             'vendor/seccomp/build.ts',
