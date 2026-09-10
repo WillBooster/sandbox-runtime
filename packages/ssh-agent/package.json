@@ -1,0 +1,21 @@
+{
+  "name": "@willbooster/sandbox-runtime-ssh-agent",
+  "version": "0.0.75-wb.1",
+  "description": "Linux SSH-agent seccomp supervisor for sandbox-runtime",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/WillBooster/sandbox-runtime.git",
+    "directory": "packages/ssh-agent"
+  },
+  "files": [
+    "arm64.bin",
+    "x64.bin",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "bun build.ts",
+    "prepack": "bun run build"
+  }
+}

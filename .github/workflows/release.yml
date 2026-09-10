@@ -10,6 +10,7 @@ permissions:
 
 jobs:
   build-seccomp:
+    if: github.repository == 'anthropics/sandbox-runtime'
     name: Build seccomp (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -33,6 +34,7 @@ jobs:
           if-no-files-found: error
 
   build-java-agent:
+    if: github.repository == 'anthropics/sandbox-runtime'
     name: Build JVM proxy agent
     runs-on: ubuntu-latest
     steps:
@@ -52,6 +54,7 @@ jobs:
           if-no-files-found: error
 
   build-srt-win:
+    if: github.repository == 'anthropics/sandbox-runtime'
     name: Build srt-win (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -93,6 +96,7 @@ jobs:
     # prebuilt binary from inside an installed package. The arm64
     # binary and seccomp binaries are not exercised here — the
     # publish job's tarball-contents check covers their presence.
+    if: github.repository == 'anthropics/sandbox-runtime'
     name: Verify package (Windows)
     needs: build-srt-win
     runs-on: windows-latest
@@ -139,6 +143,7 @@ jobs:
           Pop-Location
 
   publish:
+    if: github.repository == 'anthropics/sandbox-runtime'
     name: Publish to npm
     needs: [build-seccomp, build-java-agent, build-srt-win, verify-package]
     runs-on: ubuntu-latest
@@ -203,7 +208,7 @@ jobs:
         run: |
           npm run prepublishOnly
           npm pack
-          PKG=$(ls *.tgz)
+          PKG=$(ls ./*.tgz)
           LIST=$(tar -tzf "$PKG" | sort)
           echo "::group::tarball contents"
           echo "$LIST"
