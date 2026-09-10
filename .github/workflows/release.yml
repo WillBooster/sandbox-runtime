@@ -208,7 +208,7 @@ jobs:
         run: |
           npm run prepublishOnly
           npm pack
-          PKG=$(ls *.tgz)
+          PKG=$(ls ./*.tgz)
           LIST=$(tar -tzf "$PKG" | sort)
           echo "::group::tarball contents"
           echo "$LIST"
