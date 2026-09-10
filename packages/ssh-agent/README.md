@@ -3,7 +3,9 @@
 This package provides static Linux x64 and arm64 executables for sandbox-runtime's
 `seccompConfig.applyPath`. The C sources in `packages/ssh-agent/src` come from
 [upstream PR #510](https://github.com/anthropics/sandbox-runtime/pull/510), commit
-`dd41a418d1efff88448ff9780d2043425ccb5696`, under Apache-2.0.
+`dd41a418d1efff88448ff9780d2043425ccb5696`, under Apache-2.0. The fork corrects
+the diagnostic kernel floor to Linux 5.7 to match its existing TSYNC_ESRCH probe;
+the isolation policy and probe are unchanged.
 
 Set `seccompConfig.applyPath` to an executable wrapper script that supplies the
 allowlist flags, because SRT treats `applyPath` as one executable path, not a
@@ -22,7 +24,8 @@ a valid entry and permits sockets throughout its subtree.
 Keep the allowed socket or directory, executable, launcher, and their parent
 directories outside every sandbox write root. Protecting only a socket file is
 insufficient: a writable allowed directory can admit a hard link to another host
-socket, and writable parents can let the sandbox replace a protected path. The supervisor requires Linux 5.6+,
+socket, and writable parents can let the sandbox replace a protected path.
+The supervisor requires Linux 5.7+,
 user namespaces, seccomp notifications, and permission to use `pidfd_getfd`.
 It fails closed when those prerequisites are unavailable. While active, it mediates
 TCP as well as Unix `connect`, `bind`, and `listen`, admits 128 in-flight calls,

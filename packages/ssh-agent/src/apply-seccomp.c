@@ -241,9 +241,8 @@ static int path_allowed(const char *canon) {
     return 0;
 }
 
-/* Kernel support for brokered mode: seccomp user notification with
- * SECCOMP_USER_NOTIF_FLAG_CONTINUE (5.5; probed the way libseccomp does,
- * via a same-era filter flag with a NULL prog) and pidfd_getfd (5.6). */
+/* The TSYNC_ESRCH probe requires Linux 5.7, which also supplies CONTINUE
+ * (5.5) and pidfd_getfd (5.6). A NULL program probes without installing. */
 static int broker_supported(void) {
     if (SRT_AUDIT_ARCH == 0) return 0;
     if (!(syscall(SYS_seccomp, SECCOMP_SET_MODE_FILTER,
@@ -579,8 +578,8 @@ static int install_notify_filter(int sp_fd, int observe, int broker) {
      * kernels older than 5.5 reject with EINVAL *without* completing the
      * notification — the trapped syscall would block forever. CONTINUE is
      * a response flag with no direct probe, so detect it the way
-     * libseccomp does: validate a filter flag from the same era with a
-     * NULL prog. EFAULT = flag known (nothing installed), EINVAL = too
+     * libseccomp does: validate TSYNC_ESRCH (Linux 5.7) with a NULL
+     * prog. EFAULT = flag known (nothing installed), EINVAL = too
      * old — skip the observer entirely and stay fail-open. */
     if (!(syscall(SYS_seccomp, SECCOMP_SET_MODE_FILTER,
                   SECCOMP_FILTER_FLAG_TSYNC_ESRCH, NULL) == -1 &&
@@ -1340,7 +1339,7 @@ int main(int argc, char *argv[]) {
     if (g_broker && !broker_supported()) {
         fprintf(stderr,
                 "apply-seccomp: this kernel cannot filter unix sockets by path "
-                "(needs Linux 5.6+); blocking them entirely\n");
+                "(needs Linux 5.7+); blocking them entirely\n");
         g_broker = 0;
     }
 
