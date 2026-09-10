@@ -52,6 +52,8 @@ export const CLOUD_METADATA_ADDRESSES: readonly string[] = [
   'fd20:ce::254', // Google Cloud, IPv6-only instances
   'fd00:c1::a9fe:a9fe', // Oracle Cloud Infrastructure IPv6
   'fd00:42::42', // Scaleway IPv6
+  'fd00:a9fe:a9fe::1', // Akamai / Linode IPv6
+  'fd00:100::100:200', // Alibaba Cloud IPv6
 ]
 
 /**

@@ -224,6 +224,8 @@ describe('resolved-address-guard: permits', () => {
       'fd20:ce::254',
       'fd00:c1::a9fe:a9fe',
       'fd00:42::42',
+      'fd00:a9fe:a9fe::1',
+      'fd00:100::100:200',
     ]) {
       expect(guard.permits('api.example.com', addr, 443)).toBe(false)
     }
@@ -579,6 +581,15 @@ describe('resolved-address-guard: config schema', () => {
       deniedDomains: ['127.0.0.1'],
     })
     expect(h.permits('myapp.test', '127.0.0.1', 3000)).toBe(false)
+    // A zone id on a list entry is meaningless for matching and is dropped, so
+    // the entry means the same address here as it does for a literal request.
+    const z = createResolvedAddressGuard({
+      localAddresses,
+      allowedDomains: ['myapp.test'],
+      deniedDomains: ['[2001:db8::1%eth0]'],
+    })
+    expect(z.permits('myapp.test', '2001:db8::1', 443)).toBe(false)
+    expect(z.permits('myapp.test', '2001:db8::2', 443)).toBe(true)
   })
 })
 
