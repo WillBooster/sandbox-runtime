@@ -16,6 +16,7 @@ import {
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { connect } from 'node:net'
 import type { LookupFunction } from 'node:net'
+import { checkServerIdentity } from 'node:tls'
 import { unlink } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -555,7 +556,12 @@ async function forwardUpstream(
       headers: fwdHeaders,
       // We're a TLS-terminating proxy, not a trust boundary for the upstream
       // server's identity — the runtime verifies it normally (system roots and
-      // NODE_EXTRA_CA_CERTS) against `direct.servername`, the tunnel's target.
+      // NODE_EXTRA_CA_CERTS). Pin the identity to the tunnel's target so the
+      // check does not depend on how a runtime derives it from the Host header
+      // (some verify against `Host` verbatim, so a non-default port would
+      // never match a SAN); `servername` still carries the name for SNI.
+      checkServerIdentity: (_host, cert) =>
+        checkServerIdentity(target.hostname, cert),
       ...(target.upstreamCA ? { ca: target.upstreamCA } : {}),
     },
     upRes => {
