@@ -18,10 +18,8 @@ import {
   type Resolver,
 } from '../../src/sandbox/resolved-address-guard.js'
 import { embeddedIPv4, parseAddressRange } from '../../src/sandbox/address.js'
-import {
-  createHttpProxyServer,
-  type DirectLookup,
-} from '../../src/sandbox/http-proxy.js'
+import { createHttpProxyServer } from '../../src/sandbox/http-proxy.js'
+import { type DirectLookup } from '../../src/sandbox/parent-proxy.js'
 import { createSocksProxyServer } from '../../src/sandbox/socks-proxy.js'
 import { SandboxRuntimeConfigSchema } from '../../src/sandbox/sandbox-config.js'
 import { createMitmCA } from '../../src/sandbox/mitm-ca.js'

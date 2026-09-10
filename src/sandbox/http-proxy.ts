@@ -17,6 +17,11 @@ import {
   type FilterRequestCallback,
   type MutateForwardedHeaders,
 } from './request-filter.js'
+
+const ALLOWLIST_DENY = [
+  'Connection blocked by network allowlist',
+  'blocked-by-allowlist',
+] as const
 import {
   peekForClientHello,
   terminateAndForward,
@@ -446,12 +451,7 @@ export function createHttpProxyServer(options: HttpProxyServerOptions): Server {
         logForDebugging(`Connection blocked to ${requestedHost}:${port}`, {
           level: 'error',
         })
-        endWithStatus(
-          rawDenied(
-            'Connection blocked by network allowlist',
-            'blocked-by-allowlist',
-          ),
-        )
+        endWithStatus(rawDenied(...ALLOWLIST_DENY))
         return
       }
       // The client may have died during the filter await (EOF destroy
@@ -671,12 +671,10 @@ export function createHttpProxyServer(options: HttpProxyServerOptions): Server {
         return
       }
       const url = new URL(req.url!)
+      const isHttps = url.protocol === 'https:'
+      const defaultPort = isHttps ? 443 : 80
       const requestedHost = stripBrackets(url.hostname)
-      const port = url.port
-        ? parseInt(url.port, 10)
-        : url.protocol === 'https:'
-          ? 443
-          : 80
+      const port = url.port ? parseInt(url.port, 10) : defaultPort
 
       const allowed = await options.filter(
         port,
@@ -697,11 +695,7 @@ export function createHttpProxyServer(options: HttpProxyServerOptions): Server {
           res.destroy()
           return
         }
-        respondDenied(
-          res,
-          'Connection blocked by network allowlist',
-          'blocked-by-allowlist',
-        )
+        respondDenied(res, ...ALLOWLIST_DENY)
         return
       }
 
@@ -715,16 +709,10 @@ export function createHttpProxyServer(options: HttpProxyServerOptions): Server {
       // leaves behind is the trailing dot, which is exactly the spelling
       // that used to reach getMitmSocketPath / the upstream unchanged.
       const hostname = canonicalizeHost(requestedHost) ?? requestedHost
-      // The authority we forward (request-target and Host header) is
-      // rebuilt from the canonical host so the MITM / parent proxy sees the
-      // host we allowlist-checked, not the client's spelling of it. `url.port`
-      // is '' when the scheme default was given or implied, matching the
-      // `url.host` form this replaces.
-      const authority = formatAuthority(
-        hostname,
-        port,
-        url.protocol === 'https:' ? 443 : 80,
-      )
+      // The authority we forward (request-target and Host header) is rebuilt
+      // from the canonical host so the MITM / parent proxy sees the host we
+      // allowlist-checked, not the client's spelling of it.
+      const authority = formatAuthority(hostname, port, defaultPort)
 
       const fwdHeaders = { ...stripHopByHop(req.headers), host: authority }
       options.mutateHeadersPlaintext?.(fwdHeaders, hostname)
@@ -744,7 +732,7 @@ export function createHttpProxyServer(options: HttpProxyServerOptions): Server {
         options.parentProxy &&
         !shouldBypassParentProxy(options.parentProxy, hostname)
           ? selectParentProxyUrl(options.parentProxy, {
-              isHttps: url.protocol === 'https:',
+              isHttps,
             })
           : undefined
 
@@ -882,7 +870,6 @@ export function createHttpProxyServer(options: HttpProxyServerOptions): Server {
       } else {
         // Vet and pick the upstream address before any request object exists
         // (see directRequestOptions); the name stays in Host and, for TLS, SNI.
-        const isHttps = url.protocol === 'https:'
         let direct: DirectRequestOptions
         try {
           direct = await directRequestOptions(

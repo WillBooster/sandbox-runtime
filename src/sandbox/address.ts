@@ -9,15 +9,15 @@ import { BlockList, isIP } from 'node:net'
 /** Loopback in both families (BlockList matches IPv4-mapped forms against the IPv4 rule). */
 export const LOOPBACK_RANGES: readonly string[] = ['127.0.0.0/8', '::1']
 
-export type AddressFamily = 'ipv4' | 'ipv6'
+type AddressFamily = 'ipv4' | 'ipv6'
 
 /** BlockList family of an address string, or undefined if it is not an IP. */
-export function ipFamily(address: string): AddressFamily | undefined {
+function ipFamily(address: string): AddressFamily | undefined {
   const fam = isIP(address)
   return fam === 4 ? 'ipv4' : fam === 6 ? 'ipv6' : undefined
 }
 
-export type AddressRange = {
+type AddressRange = {
   address: string
   prefix: number
   family: AddressFamily
@@ -68,7 +68,7 @@ export function addRange(list: BlockList, entry: string): boolean {
  * Build a BlockList from IP/CIDR entries. Throws on a malformed entry — the
  * config schema validates first, so a throw here means a caller bypassed it.
  */
-export function buildAddressSet(entries: readonly string[]): BlockList {
+function buildAddressSet(entries: readonly string[]): BlockList {
   const list = new BlockList()
   for (const entry of entries) {
     if (!addRange(list, entry)) {
@@ -121,6 +121,8 @@ const dottedQuad = (hi: number, lo: number): string =>
 
 /** The IPv4 address of an IPv4-mapped IPv6 literal (`::ffff:a.b.c.d`), or undefined. */
 export function mappedIPv4(address: string): string | undefined {
+  // Cheap reject before the URL parse: a mapped form always spells `ffff`.
+  if (!/ffff/i.test(address)) return undefined
   const g = ipv6Groups(address)
   return g && g.slice(0, 5).every(x => x === 0) && g[5] === 0xffff
     ? dottedQuad(g[6]!, g[7]!)

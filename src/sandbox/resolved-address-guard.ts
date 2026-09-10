@@ -18,9 +18,9 @@
  * IP literal on the deny list is refused by name too, allowlist or not. The
  * reserved loopback names (`localhost` and anything under `.localhost`,
  * RFC 6761) resolve to loopback — that is what allow-listing them asks for —
- * or to an allow-listed literal, and to nothing else. Connections routed through a parent proxy or a MITM
- * socket are not resolved locally at all; that hop resolves the name and is
- * responsible for its own address policy.
+ * or to an allow-listed literal, and to nothing else. Connections routed
+ * through a parent proxy or a MITM socket are not resolved locally at all;
+ * that hop resolves the name and is responsible for its own address policy.
  */
 
 import { lookup as dnsLookup } from 'node:dns'
@@ -44,7 +44,7 @@ import {
  * space, so `169.254.0.0/16` / `fe80::/10` do not cover them. Single
  * addresses (or a provider-reserved block), so nothing else is caught.
  */
-export const CLOUD_METADATA_ADDRESSES: readonly string[] = [
+const CLOUD_METADATA_ADDRESSES: readonly string[] = [
   '100.100.100.200', // Alibaba Cloud
   '168.63.129.16', // Azure WireServer / host agent endpoint
   '192.0.0.192', // Oracle Cloud Infrastructure Classic
@@ -75,8 +75,15 @@ const DENIED_CLASSES: ReadonlyArray<readonly [string, readonly string[]]> = [
   ['a cloud metadata address', CLOUD_METADATA_ADDRESSES],
 ]
 
-export const DEFAULT_DENIED_RESOLVED_ADDRESSES: readonly string[] =
-  DENIED_CLASSES.flatMap(([, ranges]) => ranges)
+/** Refusal classes in priority order, so a multi-address reason reads the same however the resolver ordered its answer. */
+const REASON_ORDER: readonly string[] = [
+  'a deny-listed address',
+  ...DENIED_CLASSES.map(([why]) => why),
+  'a listed address',
+  "one of this host's addresses",
+  'a non-loopback address',
+  'an unparsable address',
+]
 
 /** Unicast addresses currently assigned to this host's network interfaces. */
 export function localInterfaceAddresses(): string[] {
@@ -140,7 +147,7 @@ type AddressRule = string | { range: string; port?: number }
 export interface ResolvedAddressGuardOptions {
   allowedDomains?: readonly string[]
   deniedDomains?: readonly string[]
-  /** IPs / CIDRs denied in addition to {@link DEFAULT_DENIED_RESOLVED_ADDRESSES} and this host's own addresses. */
+  /** IPs / CIDRs denied in addition to the built-in {@link DENIED_CLASSES} and this host's own addresses. */
   deniedResolvedAddresses?: readonly string[]
   /** Name resolver; defaults to `dns.lookup`. Test seam. */
   resolve?: Resolver
@@ -265,9 +272,13 @@ export function createResolvedAddressGuard(
             whys.add(why)
           }
         }
+        // Order the classes by the built-in priority, not by the order the
+        // resolver happened to return the addresses, so the reason (which
+        // `ignoreViolations` matches by substring) is stable.
+        const classes = REASON_ORDER.filter(w => whys.has(w))
         if (dropped.length) {
           logForDebugging(
-            `Denied address(es) for ${hostname}:${port}: ${dropped.join(', ')} (${[...whys].join('; ')})`,
+            `Denied address(es) for ${hostname}:${port}: ${dropped.join(', ')} (${classes.join('; ')})`,
           )
         }
         const first = kept[0]
@@ -276,7 +287,7 @@ export function createResolvedAddressGuard(
           const none: NodeJS.ErrnoException = dropped.length
             ? new ResolvedAddressDeniedError(
                 hostname,
-                `resolved to ${[...whys].join(' / ')}`,
+                `resolved to ${classes.join(' / ')}`,
                 dropped,
               )
             : Object.assign(new Error(`getaddrinfo ENOTFOUND ${hostname}`), {
