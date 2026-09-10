@@ -14,8 +14,15 @@ shell command. For example, using absolute paths owned by the caller:
 exec /protected/path/x64.bin --allow-unix-connect /absolute/agent.sock -- "$@"
 ```
 
-Select `arm64.bin` on Linux arm64. The caller must protect the socket,
-executable, and launcher from sandbox writes. The supervisor requires Linux 5.6+,
+Select `arm64.bin` on Linux arm64. Create and listen on the socket before starting
+the supervisor: nonexistent allowlist entries are logged and dropped; when none
+remain, the supervisor blocks Unix sockets entirely. An existing directory is also
+a valid entry and permits sockets throughout its subtree.
+
+Keep the allowed socket or directory, executable, launcher, and their parent
+directories outside every sandbox write root. Protecting only a socket file is
+insufficient: a writable allowed directory can admit a hard link to another host
+socket, and writable parents can let the sandbox replace a protected path. The supervisor requires Linux 5.6+,
 user namespaces, seccomp notifications, and permission to use `pidfd_getfd`.
 It fails closed when those prerequisites are unavailable. While active, it mediates
 TCP as well as Unix `connect`, `bind`, and `listen`, admits 128 in-flight calls,
