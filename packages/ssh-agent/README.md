@@ -5,8 +5,16 @@ This package provides static Linux x64 and arm64 executables for sandbox-runtime
 [upstream PR #510](https://github.com/anthropics/sandbox-runtime/pull/510), commit
 `dd41a418d1efff88448ff9780d2043425ccb5696`, under Apache-2.0.
 
-Invoke the executable with `--allow-unix-connect /absolute/agent.sock --` followed
-by the arguments supplied by sandbox-runtime. The caller must protect the socket,
+Set `seccompConfig.applyPath` to an executable wrapper script that supplies the
+allowlist flags, because SRT treats `applyPath` as one executable path, not a
+shell command. For example, using absolute paths owned by the caller:
+
+```sh
+#!/bin/bash -p
+exec /protected/path/x64.bin --allow-unix-connect /absolute/agent.sock -- "$@"
+```
+
+Select `arm64.bin` on Linux arm64. The caller must protect the socket,
 executable, and launcher from sandbox writes. The supervisor requires Linux 5.6+,
 user namespaces, seccomp notifications, and permission to use `pidfd_getfd`.
 It fails closed when those prerequisites are unavailable. While active, it mediates
