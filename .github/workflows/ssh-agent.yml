@@ -1,0 +1,60 @@
+name: SSH-agent artifacts
+
+on:
+  pull_request:
+    paths:
+      - packages/ssh-agent/**
+      - mise.toml
+      - .github/workflows/ssh-agent.yml
+  push:
+    tags:
+      - ssh-agent-v*
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: jdx/mise-action@v3
+      - name: Build package
+        run: |
+          mkdir -p .tmp
+          bun pm pack --cwd packages/ssh-agent --destination ../../.tmp
+          tar -tzf .tmp/*.tgz
+          file packages/ssh-agent/arm64.bin packages/ssh-agent/x64.bin
+          sha256sum packages/ssh-agent/arm64.bin packages/ssh-agent/x64.bin
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ssh-agent-package
+          path: .tmp/*.tgz
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/ssh-agent-v') && github.repository == 'WillBooster/sandbox-runtime'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify reviewed commit and version
+        run: |
+          git fetch origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+          VERSION=$(node -p "require('./packages/ssh-agent/package.json').version")
+          test "$GITHUB_REF_NAME" = "ssh-agent-v$VERSION"
+      - uses: actions/download-artifact@v4
+        with:
+          name: ssh-agent-package
+          path: .tmp
+      - name: Publish immutable version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" .tmp/*.tgz --verify-tag --title "SSH-agent ${GITHUB_REF_NAME#ssh-agent-v}" --notes-file packages/ssh-agent/README.md --latest=false

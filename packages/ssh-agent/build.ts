@@ -19,7 +19,7 @@ for (const [name, target] of [
       '-Wextra',
       '-I',
       directory,
-      path.resolve(directory, '../../vendor/seccomp-src/apply-seccomp.c'),
+      path.join(directory, 'src/apply-seccomp.c'),
       '-o',
       path.join(directory, `${name}.bin`),
     ],

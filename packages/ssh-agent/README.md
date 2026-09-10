@@ -1,7 +1,7 @@
 # Linux SSH-agent supervisor
 
 This package provides static Linux x64 and arm64 executables for sandbox-runtime's
-`seccompConfig.applyPath`. The C sources in `vendor/seccomp-src` come from
+`seccompConfig.applyPath`. The C sources in `packages/ssh-agent/src` come from
 [upstream PR #510](https://github.com/anthropics/sandbox-runtime/pull/510), commit
 `dd41a418d1efff88448ff9780d2043425ccb5696`, under Apache-2.0.
 
@@ -25,16 +25,18 @@ mise exec -- bun pm pack --cwd packages/ssh-agent --destination ../../.tmp
 ```
 
 `prepack` rebuilds both architectures with Zig 0.16.0 and static musl linkage.
-Upload the tarball to a GitHub Release tagged `ssh-agent-v<package version>` and
-pin that Release asset URL in consumers. Never replace assets of a published version;
-change the package version for every new artifact.
+After merging the package changes to `main`, push a tag named
+`ssh-agent-v<package version>` on that merged commit. The SSH-agent artifacts
+workflow rebuilds and publishes the package to a GitHub Release. Pin that Release
+asset URL in consumers. Never replace assets of a published version; change the
+package version for every new artifact.
 
 `unix-block-bpf.h` contains x64/arm64 filters generated with Debian bookworm's
 libseccomp 2.5.4. To regenerate them on Linux with libseccomp development headers:
 
 ```sh
 mkdir -p .tmp
-cc vendor/seccomp-src/seccomp-unix-block.c -lseccomp -o .tmp/seccomp-unix-block
+cc packages/ssh-agent/src/seccomp-unix-block.c -lseccomp -o .tmp/seccomp-unix-block
 .tmp/seccomp-unix-block .tmp/x64.bpf x86_64
 .tmp/seccomp-unix-block .tmp/arm64.bpf aarch64
 ```
