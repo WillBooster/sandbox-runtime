@@ -21,7 +21,7 @@ to use `pidfd_getfd` for brokered Unix connections.
 
 `--allow-local-ipc` requires at least one existing `--allow-unix-connect` path.
 Without a valid allowlist entry the broker is inactive, the local-IPC flag has no
-effect, and Unix sockets remain blocked. Supply the writable job directory even
+effect: `socket(AF_UNIX, ...)` remains blocked, while Unix socket pairs remain available. Supply the writable job directory even
 when no SSH agent is used. With that allowlist, local IPC supports reviewer
 experiments and local services. Pathname Unix
 binds run in the workload so the enclosing read-only mounts enforce their write
@@ -36,7 +36,7 @@ This mode is an accident boundary: it does not defend against another workload
 thread deliberately changing syscall arguments between inspection and execution.
 Without `--allow-local-ipc`, the supervisor brokers TCP too and refuses Unix binds
 and listens. Brokered calls admit 128 in-flight requests and return `EAGAIN` above
-that limit. A kernel that cannot initialize brokering blocks Unix sockets entirely.
+that limit. A kernel that cannot initialize brokering uses the same socket-creation block.
 
 ## Build and distribute
 
