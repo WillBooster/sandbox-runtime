@@ -1,7 +1,7 @@
 /*
  * apply-seccomp.c - Apply seccomp BPF filter in an isolated PID namespace
  *
- * Usage: apply-seccomp [--allow-unix-connect PATH]... [--] <command> [args...]
+ * Usage: apply-seccomp [--allow-local-ipc] [--allow-unix-connect PATH]... [--] <command> [args...]
  *
  * This program applies a baked-in seccomp BPF filter, isolates the
  * target command in a nested user+PID+mount namespace so it cannot see or
@@ -195,6 +195,7 @@ static int g_nallow;
  * instead of the baked-in block filter, and the outer stub performs every
  * connect()/bind() on the workload's behalf. */
 static int g_broker;
+static int g_local_ipc;
 /* The outer stub's cwd is the pinned procfs "self/fd" directory, so a
  * relative sun_path of "<fd>" names the magic link of one of its own fds. */
 static int g_fdcwd_ok;
@@ -1004,10 +1005,37 @@ static void answer_now(int notify_fd, struct seccomp_notif_resp *resp,
     (void)ioctl(notify_fd, SECCOMP_IOCTL_NOTIF_SEND, resp);
 }
 
+/* Local-development mode delegates ordinary networking to the workload's
+ * kernel context. Pathname binds therefore obey its read-only mounts instead
+ * of being performed by the outer broker. The caller must supply filesystem
+ * isolation; this mode prevents accidental host access, not adversarial
+ * mutation of syscall arguments by another workload thread. */
+static int continue_local_call(const struct seccomp_notif *req) {
+    if (!g_local_ipc) return 0;
+    if (req->data.nr == __NR_listen) return 1;
+    struct sockaddr_un address = {0};
+    size_t length = (size_t)req->data.args[2];
+    if (length < sizeof(sa_family_t)) return 0;
+    if (length > sizeof(address)) length = sizeof(address);
+    struct iovec local = { .iov_base = &address, .iov_len = length };
+    struct iovec remote = { .iov_base = (void *)(uintptr_t)req->data.args[1], .iov_len = length };
+    if (process_vm_readv(req->pid, &local, 1, &remote, 1, 0) != (ssize_t)length) return 0;
+    if (address.sun_family == AF_INET || address.sun_family == AF_INET6) return 1;
+    return req->data.nr == __NR_bind && address.sun_family == AF_UNIX &&
+           length > offsetof(struct sockaddr_un, sun_path) && address.sun_path[0] != '\0';
+}
+
 static void dispatch_broker(int notify_fd, int host_proc_fd,
                             const struct seccomp_notif *req,
                             struct seccomp_notif_resp *resp,
                             size_t req_size, size_t resp_size) {
+    if (continue_local_call(req)) {
+        memset(resp, 0, resp_size);
+        resp->id = req->id;
+        resp->flags = SECCOMP_USER_NOTIF_FLAG_CONTINUE;
+        (void)ioctl(notify_fd, SECCOMP_IOCTL_NOTIF_SEND, resp);
+        return;
+    }
     if (__atomic_add_fetch(&g_broker_inflight, 1, __ATOMIC_RELAXED) >
         BROKER_MAX_INFLIGHT) {
         __atomic_sub_fetch(&g_broker_inflight, 1, __ATOMIC_RELAXED);
@@ -1313,6 +1341,10 @@ int main(int argc, char *argv[]) {
     int argi = 1;
     for (; argi < argc; argi++) {
         if (strcmp(argv[argi], "--") == 0) { argi++; break; }
+        if (strcmp(argv[argi], "--allow-local-ipc") == 0) {
+            g_local_ipc = 1;
+            continue;
+        }
         if (strcmp(argv[argi], "--allow-unix-connect") == 0 && argi + 1 < argc) {
             add_allow(argv[++argi]);
             continue;
@@ -1325,7 +1357,7 @@ int main(int argc, char *argv[]) {
     }
     if (argi >= argc) {
         fprintf(stderr,
-                "Usage: %s [--allow-unix-connect PATH]... [--] <command> [args...]\n",
+                "Usage: %s [--allow-local-ipc] [--allow-unix-connect PATH]... [--] <command> [args...]\n",
                 argv[0]);
         return 1;
     }
