@@ -19,7 +19,11 @@ an individual socket permits only that endpoint. Unrelated host sockets remain d
 The supervisor requires Linux 5.7+, user namespaces, seccomp notifications, and permission
 to use `pidfd_getfd` for brokered Unix connections.
 
-`--allow-local-ipc` supports reviewer experiments and local services. Pathname Unix
+`--allow-local-ipc` requires at least one existing `--allow-unix-connect` path.
+Without a valid allowlist entry the broker is inactive, the local-IPC flag has no
+effect, and Unix sockets remain blocked. Supply the writable job directory even
+when no SSH agent is used. With that allowlist, local IPC supports reviewer
+experiments and local services. Pathname Unix
 binds run in the workload so the enclosing read-only mounts enforce their write
 boundary. Abstract Unix binds are denied. TCP/IPv6 calls and listen operations
 continue in the workload without a broker thread or duplicated socket descriptor.

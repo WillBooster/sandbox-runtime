@@ -11,11 +11,13 @@
  * Without --allow-unix-connect the filter denies socket(AF_UNIX, ...)
  * outright. With one or more --allow-unix-connect entries (a socket path,
  * or a directory whose sockets are all allowed), AF_UNIX stream/seqpacket
- * sockets may be created, and every connect()/bind() is brokered by the
+ * sockets may be created. In the default mode every connect()/bind() is brokered by the
  * outer stub through seccomp user notification: the stub performs the
  * syscall itself on the caller's socket and only lets a unix connect
  * through when the canonical target path is inside the allowlist. See
  * "Brokered unix connect" below for why nothing weaker is race-free.
+ * --allow-local-ipc deliberately relaxes that rule through continue_local_call;
+ * it only takes effect with at least one existing allowlist entry.
  *
  * Process layout inside the outer bwrap sandbox:
  *
@@ -699,7 +701,8 @@ static size_t resolve_relative(int host_proc_fd, pid_t pid,
 
 /* ---- Brokered unix connect ---------------------------------------------
  *
- * Why the supervisor performs connect()/bind() itself and NEVER answers
+ * In the default brokered mode the supervisor performs connect()/bind() itself
+ * and NEVER answers
  * SECCOMP_USER_NOTIF_FLAG_CONTINUE for them: BPF sees only an fd number and
  * a userspace pointer. Both the address family (in the socket object) and
  * the target path (in the caller's memory) can be changed by a sibling
@@ -718,7 +721,12 @@ static size_t resolve_relative(int host_proc_fd, pid_t pid,
  * hold, inet calls are brokered too — they are simply performed as-is
  * (the stub shares the workload's network and mount namespaces).
  *
- * Residual, by design: anything that can create a socket inside an
+ * Exception: --allow-local-ipc uses continue_local_call to inspect then CONTINUE
+ * INET/INET6 calls, pathname Unix binds and listen calls. That opt-in mode
+ * deliberately accepts argument races as an accident boundary and permits
+ * job-owned socket directories protected by the caller's writable mounts.
+ *
+ * In the default mode, anything that can create a socket inside an
  * allow-listed directory can be connected to, so allow-listed directories
  * must not be writable by the sandbox. The final-component swap race is
  * eliminated (not merely narrowed) by connecting through a pinned O_PATH

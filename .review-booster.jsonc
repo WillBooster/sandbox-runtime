@@ -1,5 +1,6 @@
 {
   "facts": [
-    "[risk] packages/ssh-agent/src and packages/ssh-agent/unix-block-bpf.h are an independently versioned source snapshot for the native helper package. They intentionally do not track vendor/seccomp-src automatically: adopting upstream changes is an explicit reviewed package update, followed by a new package version before publishing. The committed filter header permits macOS cross-builds without Linux libseccomp; matching files in the upstream runtime are not shared mutable inputs to this package."
+    "[risk] packages/ssh-agent/src and packages/ssh-agent/unix-block-bpf.h are an independently versioned source snapshot for the native helper package. They intentionally do not track vendor/seccomp-src automatically: adopting upstream changes is an explicit reviewed package update, followed by a new package version before publishing. The committed filter header permits macOS cross-builds without Linux libseccomp; matching files in the upstream runtime are not shared mutable inputs to this package.",
+    "[risk] packages/ssh-agent/src/apply-seccomp.c deliberately accepts concurrent syscall-argument races only in the opt-in --allow-local-ipc mode; README defines it as accident protection with caller-provided filesystem/process isolation, not hostile-code confinement. Default brokering retains its separate strict behavior."
   ]
 }
