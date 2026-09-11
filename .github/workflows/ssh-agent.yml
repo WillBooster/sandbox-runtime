@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
         with:
@@ -28,6 +28,11 @@ jobs:
           tar -tzf .tmp/*.tgz
           file packages/ssh-agent/arm64.bin packages/ssh-agent/x64.bin
           sha256sum packages/ssh-agent/arm64.bin packages/ssh-agent/x64.bin
+      - name: Test local IPC and host protection
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y bubblewrap
+          python3 packages/ssh-agent/test/unit/localIpc.py
       - uses: actions/upload-artifact@v4
         with:
           name: ssh-agent-package

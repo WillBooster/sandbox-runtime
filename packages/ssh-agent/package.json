@@ -1,6 +1,6 @@
 {
   "name": "@willbooster/sandbox-runtime-ssh-agent",
-  "version": "0.0.75-wb.1",
+  "version": "0.0.75-wb.2",
   "description": "Linux SSH-agent seccomp supervisor for sandbox-runtime",
   "license": "Apache-2.0",
   "repository": {
